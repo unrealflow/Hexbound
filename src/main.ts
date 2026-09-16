@@ -115,7 +115,7 @@ scene.onPointerObservable.add((pi) => {
   highlight.position.z = w.z;
   const isWater =
     cell.terrainId === Terrain.ShallowWater || cell.terrainId === Terrain.DeepWater;
-  highlight.position.y = isWater ? 0.12 : cell.elev * 1.55 + 0.12;
+  highlight.position.y = isWater ? 0.12 : cell.elev * 1.7 + 0.12;
   highlight.setEnabled(true);
 });
 
@@ -126,6 +126,7 @@ engine.runRenderLoop(() => {
     enableDisplace: st.enableDisplace,
     enableFog: st.enableFog,
     showWireHint: st.showWireHint,
+    useDetailTex: st.useDetailTex,
   });
   scene.render();
 });

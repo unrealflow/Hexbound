@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "refs:fetch": "node scripts/fetch-refs.mjs",
-    "shots": "node scripts/capture-shots.mjs"
+    "shots": "node scripts/capture-shots.mjs",
+    "tex:gen": "node scripts/gen-detail-tex.mjs"
   },
   "devDependencies": {
     "typescript": "~6.0.2",

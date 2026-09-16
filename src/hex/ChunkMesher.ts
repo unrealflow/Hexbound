@@ -8,7 +8,7 @@ import { HexMap, Terrain } from './HexMap';
 import { createHexTerrainMaterial, type HexTerrainMaterial } from '../render/HexTerrainMaterial';
 
 export const CHUNK_SIZE = 8;
-export const ELEV_SCALE = 1.55;
+export const ELEV_SCALE = 1.7;
 
 export interface ChunkMeshes {
   meshes: Mesh[];
@@ -19,7 +19,8 @@ export interface ChunkMeshes {
 /**
  * Build one Mesh per 8×8 chunk with top + side hex prism geometry
  * and per-vertex terrain attributes for the procedural shader.
- * Side faces drop to neighbor tops for Humankind-style cliff terraces.
+ * Corner heights blend toward neighbors for continuous-feeling terrain
+ * while preserving Humankind-style cliff drops on large elev deltas.
  */
 export function meshMap(scene: Scene, map: HexMap): ChunkMeshes {
   const material = createHexTerrainMaterial(scene);
@@ -51,6 +52,42 @@ function cellTopY(map: HexMap, localQ: number, localR: number): number {
   const isWater =
     cell.terrainId === Terrain.ShallowWater || cell.terrainId === Terrain.DeepWater;
   return isWater ? 0.02 : cell.elev * ELEV_SCALE;
+}
+
+/**
+ * Blend corner height with the two neighbors that share this corner.
+ * Large elev deltas → keep self height (cliff). Similar elev → soften plateau.
+ */
+function cornerTopY(
+  map: HexMap,
+  lq: number,
+  lr: number,
+  corner: number,
+  selfY: number,
+  isWater: boolean,
+): number {
+  if (isWater) return selfY;
+  const i0 = (corner + 5) % 6;
+  const i1 = corner % 6;
+  const d0 = AXIAL_DIRS[i0]!;
+  const d1 = AXIAL_DIRS[i1]!;
+  const y0 = cellTopY(map, lq + d0.q, lr + d0.r);
+  const y1 = cellTopY(map, lq + d1.q, lr + d1.r);
+
+  // Blend weight drops when neighbor is much lower/higher (cliff preserve)
+  const soft = (ny: number) => {
+    const delta = Math.abs(selfY - ny);
+    return 1 - smoothstep(0.06, 0.32, delta);
+  };
+  const w0 = soft(y0) * 0.28;
+  const w1 = soft(y1) * 0.28;
+  const wSelf = 1 - w0 - w1;
+  return selfY * wSelf + y0 * w0 + y1 * w1;
+}
+
+function smoothstep(e0: number, e1: number, x: number): number {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
 }
 
 function buildChunkMesh(
@@ -86,32 +123,41 @@ function buildChunkMesh(
       const isWater =
         cell.terrainId === Terrain.ShallowWater || cell.terrainId === Terrain.DeepWater;
       const isDeep = cell.terrainId === Terrain.DeepWater;
-      const yTop = isWater ? (isDeep ? -0.02 : 0.04) : cell.elev * ELEV_SCALE;
+      const yTopFlat = isWater ? (isDeep ? -0.02 : 0.04) : cell.elev * ELEV_SCALE;
 
-      // Base of prism: at least a skirt, or down to lowest neighbor for cliffs
-      let minNeighborY = yTop;
+      // Soften flat tops: slight center lift on land / forest
+      const yCenter =
+        isWater
+          ? yTopFlat
+          : yTopFlat + (cell.featureId === 1 || cell.featureId === 2 ? 0.04 : 0.015);
+
+      let minNeighborY = yTopFlat;
       for (let d = 0; d < 6; d++) {
         const dir = AXIAL_DIRS[d]!;
-        const nq = lq + dir.q;
-        const nr = lr + dir.r;
-        const ny = cellTopY(map, nq, nr);
+        const ny = cellTopY(map, lq + dir.q, lr + dir.r);
         minNeighborY = Math.min(minNeighborY, ny);
       }
-      const skirt = isWater ? 0.2 : 0.28 + cell.elev * 0.55;
+      const skirt = isWater ? 0.22 : 0.3 + cell.elev * 0.6;
       const yBot = isWater
-        ? -0.18
-        : Math.min(yTop - skirt, minNeighborY - 0.02);
+        ? -0.2
+        : Math.min(yTopFlat - skirt, minNeighborY - 0.02);
 
-      // --- Top face: center + 6 corners ---
+      // Precompute blended corner heights
+      const cornerYs: number[] = [];
+      for (let i = 0; i < 6; i++) {
+        cornerYs.push(cornerTopY(map, lq, lr, i, yTopFlat, isWater));
+      }
+
+      // --- Top face ---
       const topCenter = base;
-      pushV(positions, normals, cxw, yTop, czw, 0, 1, 0);
+      pushV(positions, normals, cxw, yCenter, czw, 0, 1, 0);
       pushAttr(terrainIds, featureIds, elevs, moistures, edgeMasks, hexCorners, uvs, cell, -1, 0, 0);
       base++;
 
       const topCorners: number[] = [];
       for (let i = 0; i < 6; i++) {
-        const c = hexCornerOffset(i, HEX_SIZE * 0.98);
-        pushV(positions, normals, cxw + c.x, yTop, czw + c.z, 0, 1, 0);
+        const c = hexCornerOffset(i, HEX_SIZE * 1.002);
+        pushV(positions, normals, cxw + c.x, cornerYs[i]!, czw + c.z, 0, 1, 0);
         pushAttr(terrainIds, featureIds, elevs, moistures, edgeMasks, hexCorners, uvs, cell, i, c.x, c.z);
         topCorners.push(base);
         base++;
@@ -120,21 +166,22 @@ function buildChunkMesh(
         indices.push(topCenter, topCorners[i]!, topCorners[(i + 1) % 6]!);
       }
 
-      // --- Sides: always for land; shallow banks for water; skip deep clutter ---
+      // --- Sides ---
       if (!isDeep) {
         for (let i = 0; i < 6; i++) {
           const dir = AXIAL_DIRS[i]!;
           const nq = lq + dir.q;
           const nr = lr + dir.r;
           const neighborTop = cellTopY(map, nq, nr);
-          // Drop this edge face to neighbor top (cliff wall) or full skirt
+          const yA = cornerYs[i]!;
+          const yB = cornerYs[(i + 1) % 6]!;
+          const edgeTop = Math.max(yA, yB);
           const edgeBot = isWater
             ? yBot
-            : Math.min(yTop - 0.12, Math.min(neighborTop, yBot));
+            : Math.min(edgeTop - 0.1, Math.min(neighborTop, yBot));
 
-          // Skip nearly flat coplanar sides between equal land tiles (reduces z-fight)
-          const drop = yTop - edgeBot;
-          if (!isWater && drop < 0.08 && map.inBoundsLocal(nq, nr)) {
+          const drop = edgeTop - edgeBot;
+          if (!isWater && drop < 0.07 && map.inBoundsLocal(nq, nr)) {
             const nCell = map.getLocal(nq, nr);
             const nWater =
               nCell.terrainId === Terrain.ShallowWater ||
@@ -142,8 +189,8 @@ function buildChunkMesh(
             if (!nWater && Math.abs(nCell.elev - cell.elev) < 0.04) continue;
           }
 
-          const c0 = hexCornerOffset(i, HEX_SIZE * 0.98);
-          const c1 = hexCornerOffset((i + 1) % 6, HEX_SIZE * 0.98);
+          const c0 = hexCornerOffset(i, HEX_SIZE * 1.002);
+          const c1 = hexCornerOffset((i + 1) % 6, HEX_SIZE * 1.002);
           const mx = (c0.x + c1.x) * 0.5;
           const mz = (c0.z + c1.z) * 0.5;
           const len = Math.hypot(mx, mz) || 1;
@@ -151,11 +198,11 @@ function buildChunkMesh(
           const nz = mz / len;
 
           const i0 = base;
-          pushV(positions, normals, cxw + c0.x, yTop, czw + c0.z, nx, 0, nz);
+          pushV(positions, normals, cxw + c0.x, yA, czw + c0.z, nx, 0, nz);
           pushAttr(terrainIds, featureIds, elevs, moistures, edgeMasks, hexCorners, uvs, cell, i, c0.x, c0.z);
           base++;
           const i1 = base;
-          pushV(positions, normals, cxw + c1.x, yTop, czw + c1.z, nx, 0, nz);
+          pushV(positions, normals, cxw + c1.x, yB, czw + c1.z, nx, 0, nz);
           pushAttr(terrainIds, featureIds, elevs, moistures, edgeMasks, hexCorners, uvs, cell, i + 1, c1.x, c1.z);
           base++;
           const i2 = base;

@@ -9,6 +9,7 @@ export interface DebugState {
   enableDisplace: boolean;
   enableFog: boolean;
   showWireHint: boolean;
+  useDetailTex: boolean;
   selected: HexCell | null;
 }
 
@@ -25,7 +26,8 @@ export function createDebugPanel(initialSeed: number): DebugPanelHandles {
     seed: initialSeed,
     enableDisplace: true,
     enableFog: true,
-    showWireHint: true,
+    showWireHint: false,
+    useDetailTex: true,
     selected: null,
   };
 
@@ -40,13 +42,14 @@ export function createDebugPanel(initialSeed: number): DebugPanelHandles {
     </div>
     <label><span>山体位移</span><input type="checkbox" id="dbg-disp" checked /></label>
     <label><span>距离雾</span><input type="checkbox" id="dbg-fog" checked /></label>
-    <label><span>六边边缘暗示</span><input type="checkbox" id="dbg-wire" checked /></label>
+    <label><span>六边边缘暗示</span><input type="checkbox" id="dbg-wire" /></label>
+    <label><span>细节贴图</span><input type="checkbox" id="dbg-tex" checked /></label>
     <div class="row">
       <div>选中格</div>
       <div class="mono" id="dbg-hex">点击地图拾取 hex</div>
     </div>
     <div class="row" style="font-size:11px;opacity:0.75">
-      滚轮缩放 · 右键/中键拖拽平移 · 纯程序化 Shader（无贴图）
+      滚轮缩放 · 右键/中键拖拽 · 程序化 FBM + 平铺细节贴图（无照片地表 atlas）
     </div>
   `;
   document.body.appendChild(root);
@@ -82,6 +85,10 @@ export function createDebugPanel(initialSeed: number): DebugPanelHandles {
   });
   (root.querySelector('#dbg-wire') as HTMLInputElement).addEventListener('change', (e) => {
     state.showWireHint = (e.target as HTMLInputElement).checked;
+    notifyToggle();
+  });
+  (root.querySelector('#dbg-tex') as HTMLInputElement).addEventListener('change', (e) => {
+    state.useDetailTex = (e.target as HTMLInputElement).checked;
     notifyToggle();
   });
 

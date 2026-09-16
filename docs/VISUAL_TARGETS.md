@@ -20,6 +20,7 @@ All files live under `refs/` (copied from `/workspace/hexbound-refs/`). See `ref
 
 ## Constraint reminder
 
-- **No** `sampler2D` image textures in runtime shaders.
-- **No** `.glb` / tree / rock models for terrain dress.
-- Appearance = vertex attrs (`terrainId`, `featureId`, `elev`, …) + GLSL noise / SDF / lighting.
+- **Allowed:** small synthesized / tiling noise & detail textures (`public/tex/`) for micro-detail (grass/rock/sand/water normals/canopy).
+- **Avoid:** full photo terrain albedo atlases as the only look; no tree/rock `.glb` dress unless necessary.
+- Appearance = vertex attrs (`terrainId`, `featureId`, `elev`, …) + GLSL FBM / SDF / lighting **plus** optional tiling detail samplers.
+- Art refs under `refs/*.jpg` remain **direction only** — do not sample those JPGs in shaders.
