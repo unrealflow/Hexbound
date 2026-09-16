@@ -1,0 +1,19 @@
+{
+  "name": "hexbound",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "refs:fetch": "node scripts/fetch-refs.mjs"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2",
+    "vite": "^8.3.0"
+  },
+  "dependencies": {
+    "@babylonjs/core": "^9.26.1"
+  }
+}
