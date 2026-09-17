@@ -2,6 +2,8 @@
 
 Local validation captures (not runtime assets). Generated via `npm run shots` against a running Vite server (`npm run dev`, default port 5173; override with `npm run shots -- --port <n>`).
 
+These PNGs are **not versioned** (binaries stay out of the repo); regenerate them locally with `npm run shots`. Art references under `refs/` are likewise fetched with `npm run refs:fetch`.
+
 Fast iteration loop while tuning shaders:
 - `npm start` — one-click launcher (checks deps, generates `public/tex/`, serves, opens browser)
 - `npm run glsl:check` — compiles `hexTerrain.{vert,frag}.glsl` in both GLSL ES 1.00 and 300 es; catches errors before a render round-trip

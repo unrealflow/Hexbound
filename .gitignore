@@ -23,5 +23,8 @@ dist-ssr
 *.sln
 *.sw?
 
-# Per-iteration capture artifacts written by `npm run shots:iter`
-docs/shots/_*
+# Local binaries are not versioned (repo keeps only runtime assets such as public/tex/):
+#   docs/shots/*.png  -> regenerate with `npm run shots` / `npm run shots:iter`
+#   refs/*.jpg        -> download with `npm run refs:fetch` (see refs/SOURCES.md)
+docs/shots/*.png
+refs/*.jpg

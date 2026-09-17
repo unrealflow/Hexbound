@@ -2,7 +2,7 @@
 
 Runtime **must not** sample these images. They are **art-direction references only** (Civ / Humankind / AoW4 readability bar).
 
-All files live under `refs/` (copied from `/workspace/hexbound-refs/`). See `refs/SOURCES.md` for Steam CDN provenance and copyright.
+All files live under `refs/` — these JPEGs are **not versioned** (binaries stay out of the repo); fetch them with `npm run refs:fetch`. See `refs/SOURCES.md` for Steam CDN provenance and copyright.
 
 ## Terrain type → reference mapping
 
