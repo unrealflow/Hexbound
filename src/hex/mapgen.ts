@@ -67,6 +67,15 @@ export interface MapGenOptions {
   height?: number;
 }
 
+/** Filled by the last generateMap call (P1 one-shot stats). */
+export const p1Stats = {
+  forestBlobsBefore: 0,
+  forestBlobsAfter: 0,
+  forestIsolatesBefore: 0,
+  forestIsolatesAfter: 0,
+  riverPathCells: 0,
+};
+
 /**
  * Seeded procedural map — larger coherent biomes, clearer coasts & mountain spines
  * (Civ / Humankind readability; avoids sparse white-ish hex noise).
@@ -83,7 +92,7 @@ export function generateMap(opts: MapGenOptions): HexMap {
   const elevField = new Float32Array(width * height);
   const landField = new Float32Array(width * height);
 
-  map.forEach((cell, lq, lr) => {
+  map.forEach((_cell, lq, lr) => {
     const nx = lq / width;
     const ny = lr / height;
 
@@ -99,7 +108,7 @@ export function generateMap(opts: MapGenOptions): HexMap {
     // Mountain spine — localized, not map-wide
     const spine = ridge(wx * 2.8 + 0.5, wy * 2.8, seed + 77, 5);
     const spine2 = ridge(wx * 4.2 - 1.2, wy * 1.6 + 0.8, seed + 91, 4);
-    const spineMix = Math.max(spine * 0.9, spine2 * 0.7);
+    const spineMix = Math.max(spine * 0.9, spine2 * 0.45);
 
     const edgeDist = Math.min(nx, 1 - nx, ny, 1 - ny);
     // Soft land only in interior; outer ~25% trends ocean
@@ -119,12 +128,8 @@ export function generateMap(opts: MapGenOptions): HexMap {
     if (landMass >= 0.0) {
       // Most land stays low; mountains only on strong spines
       let e = 0.15 + elevNoise * 0.3 + Math.max(0, landMass) * 0.4;
-      if (spineMix > 0.55) e += (spineMix - 0.55) * 1.25;
-      else if (spineMix > 0.45) e += (spineMix - 0.45) * 0.55;
+      if (spineMix > 0.48) e += (spineMix - 0.48) * 1.05;
       elev = Math.min(1, Math.max(0.08, e));
-      const tier = Math.floor(elev * 5.0);
-      elev = (tier + 0.35 + hash2(cell.q, cell.r, seed + 3) * 0.3) / 5.0;
-      elev = Math.min(1, Math.max(0.08, elev));
     }
     elevField[lr * width + lq] = elev;
   });
@@ -147,19 +152,21 @@ export function generateMap(opts: MapGenOptions): HexMap {
     const tempNoise = fbm(wx * 1.4 + 40, wy * 1.4, seed + 19, 3);
     const spine = ridge(wx * 2.2 + 0.5, wy * 2.2, seed + 77, 5);
     const spine2 = ridge(wx * 3.8 - 1.2, wy * 1.4 + 0.8, seed + 91, 4);
-    const spineMix = Math.max(spine, spine2 * 0.85);
+    const spineMix = Math.max(spine * 0.9, spine2 * 0.45);
     const forestBelt = fbm(wx * 1.6 + 60, wy * 1.6, seed + 88, 4);
     const aridBelt = fbm(wx * 1.5 + 120, wy * 1.5, seed + 50, 3);
 
     let terrainId: TerrainId = Terrain.Plains;
     let featureId: FeatureId = Feature.None;
     let moisture = moistNoise;
+    let forestCover = 0;
 
     const coastal = landMass >= 0.0 && landMass < 0.12;
 
     if (landMass < 0.0) {
-      terrainId = landMass < -0.12 ? Terrain.DeepWater : Terrain.ShallowWater;
-      if (landMass > -0.06) terrainId = Terrain.ShallowWater;
+      // Narrower shallow shelf → more true deep ocean (navy) for Humankind coasts
+      terrainId = landMass < -0.06 ? Terrain.DeepWater : Terrain.ShallowWater;
+      if (landMass > -0.02) terrainId = Terrain.ShallowWater;
       elev = 0;
       moisture = 1;
     } else {
@@ -171,7 +178,6 @@ export function generateMap(opts: MapGenOptions): HexMap {
 
       if (elev > 0.65 || (spineMix > 0.6 && elev > 0.45)) {
         terrainId = Terrain.Mountains;
-        elev = Math.max(elev, 0.75);
       } else if (elev > 0.42 || (spineMix > 0.52 && elev > 0.32)) {
         terrainId = Terrain.Hills;
       } else if (temp < 0.22) {
@@ -185,17 +191,17 @@ export function generateMap(opts: MapGenOptions): HexMap {
         terrainId = Terrain.Plains;
       }
 
-      // Contiguous forest belts — denser on grassland/plains
+      // Continuous forest cover — no per-hex 0/1 hash. featureId is UI only.
       if (
         terrainId !== Terrain.Mountains &&
         terrainId !== Terrain.Desert &&
         terrainId !== Terrain.Tundra
       ) {
         const belt = forestBelt * 0.55 + moisture * 0.45;
-        if (belt > 0.4 && hash2(q, r, seed + 99) < Math.min(0.92, belt * 0.95)) {
+        const moistBoost = moisture > 0.52 && elev < 0.45 ? 0.12 : 0;
+        forestCover = Math.min(1, Math.max(0, belt + moistBoost));
+        if (forestCover > 0.45) {
           featureId = moisture > 0.58 && temp > 0.45 ? Feature.Rainforest : Feature.Forest;
-        } else if (moisture > 0.52 && elev < 0.45 && hash2(q, r, seed + 100) < 0.5) {
-          featureId = Feature.Forest;
         }
       }
 
@@ -221,6 +227,8 @@ export function generateMap(opts: MapGenOptions): HexMap {
     cell.featureId = featureId;
     cell.elev = elev;
     cell.moisture = moisture;
+    cell.forestCover = forestCover;
+    cell.riverDist = terrainId === Terrain.ShallowWater || terrainId === Terrain.DeepWater ? 0 : 1;
   });
 
   // Coastal shallow ring
@@ -288,7 +296,220 @@ export function generateMap(opts: MapGenOptions): HexMap {
     }
   });
 
+  coalesceForestCover(map);
+  carveValleys(map, rng);
+
   map.recomputeEdgeMasks();
+  map.recomputeShoreDepth();
   void rng();
   return map;
+}
+
+const AXIAL6: readonly [number, number][] = [
+  [1, 0],
+  [1, -1],
+  [0, -1],
+  [-1, 0],
+  [-1, 1],
+  [0, 1],
+];
+
+function isWaterId(t: number): boolean {
+  return t === Terrain.ShallowWater || t === Terrain.DeepWater;
+}
+
+function forestBlobCount(cover: number[], w: number, h: number): { blobs: number; isolates: number } {
+  const seen = new Uint8Array(cover.length);
+  let blobs = 0;
+  let isolates = 0;
+  for (let i = 0; i < cover.length; i++) {
+    if (cover[i]! <= 0.45 || seen[i]) continue;
+    const stack = [i];
+    seen[i] = 1;
+    let size = 0;
+    while (stack.length) {
+      const idx = stack.pop()!;
+      size++;
+      const lr = Math.floor(idx / w);
+      const lq = idx - lr * w;
+      for (const [dq, dr] of AXIAL6) {
+        const nq = lq + dq;
+        const nr = lr + dr;
+        if (nq < 0 || nr < 0 || nq >= w || nr >= h) continue;
+        const nIdx = nr * w + nq;
+        if (seen[nIdx] || cover[nIdx]! <= 0.45) continue;
+        seen[nIdx] = 1;
+        stack.push(nIdx);
+      }
+    }
+    blobs++;
+    if (size === 1) isolates++;
+  }
+  return { blobs, isolates };
+}
+
+/** 6-neighbor majority on forestCover: kill pepper, fill holes. */
+function coalesceForestCover(map: HexMap): void {
+  const snap: number[] = [];
+  map.forEach((cell) => snap.push(cell.forestCover));
+  const before = forestBlobCount(snap, map.width, map.height);
+  map.forEach((cell, lq, lr) => {
+    if (isWaterId(cell.terrainId) || cell.terrainId === Terrain.Mountains) {
+      cell.forestCover = 0;
+      return;
+    }
+    // De-speckle only: drop a lone forest cell with <=1 forested neighbor.
+    // No tail snapping — the field must stay continuous in (0.05, 0.95).
+    let forestedNbrs = 0;
+    for (const [dq, dr] of AXIAL6) {
+      const nq = lq + dq;
+      const nr = lr + dr;
+      if (!map.inBoundsLocal(nq, nr)) continue;
+      if (snap[nr * map.width + nq]! > 0.2) forestedNbrs++;
+    }
+    if (forestedNbrs <= 1) cell.forestCover = 0;
+    if (cell.forestCover > 0.45) {
+      if (cell.featureId === Feature.None || cell.featureId === Feature.Forest || cell.featureId === Feature.Rainforest) {
+        cell.featureId = cell.moisture > 0.58 ? Feature.Rainforest : Feature.Forest;
+      }
+    } else if (cell.featureId === Feature.Forest || cell.featureId === Feature.Rainforest) {
+      cell.featureId = Feature.None;
+    }
+  });
+  const afterCover: number[] = [];
+  map.forEach((c) => afterCover.push(c.forestCover));
+  const after = forestBlobCount(afterCover, map.width, map.height);
+  p1Stats.forestBlobsBefore = before.blobs;
+  p1Stats.forestIsolatesBefore = before.isolates;
+  p1Stats.forestBlobsAfter = after.blobs;
+  p1Stats.forestIsolatesAfter = after.isolates;
+}
+
+/** Walk downhill from wet lowland seeds; store riverDist for later shading. */
+function carveValleys(map: HexMap, rng: () => number): void {
+  const seeds: { lq: number; lr: number; moist: number }[] = [];
+  map.forEach((cell, lq, lr) => {
+    if (isWaterId(cell.terrainId)) return;
+    if (cell.elev < 0.28 && cell.moisture > 0.55) seeds.push({ lq, lr, moist: cell.moisture });
+  });
+  seeds.sort((a, b) => b.moist - a.moist);
+
+  const onPath = new Uint8Array(map.width * map.height);
+  let rivers = 0;
+  const MAX_RIVERS = 6;
+  for (const s of seeds) {
+    if (rivers >= MAX_RIVERS) break;
+    const start = map.index(s.lq, s.lr);
+    if (onPath[start]) continue;
+    const steps = 8 + Math.floor(rng() * 13);
+    let lq = s.lq;
+    let lr = s.lr;
+    let prev = -1;
+    const path: number[] = [];
+    for (let k = 0; k < steps; k++) {
+      const idx = map.index(lq, lr);
+      if (onPath[idx]) break;
+      const cell = map.getLocal(lq, lr);
+      if (isWaterId(cell.terrainId)) break;
+      path.push(idx);
+      onPath[idx] = 1;
+      let bestQ = lq;
+      let bestR = lr;
+      let bestE = 99;
+      let found = false;
+      let hitWater = false;
+      for (const [dq, dr] of AXIAL6) {
+        const nq = lq + dq;
+        const nr = lr + dr;
+        if (!map.inBoundsLocal(nq, nr)) continue;
+        const nIdx = map.index(nq, nr);
+        if (nIdx === prev) continue;
+        const n = map.getLocal(nq, nr);
+        if (isWaterId(n.terrainId)) {
+          hitWater = true;
+          continue;
+        }
+        if (n.elev <= bestE) {
+          bestE = n.elev;
+          bestQ = nq;
+          bestR = nr;
+          found = true;
+        }
+      }
+      if (!found) {
+        if (hitWater) break;
+        break;
+      }
+      prev = idx;
+      lq = bestQ;
+      lr = bestR;
+    }
+    if (path.length < 3) {
+      for (const idx of path) onPath[idx] = 0;
+      continue;
+    }
+    rivers++;
+    p1Stats.riverPathCells += path.length;
+    for (const idx of path) {
+      const lr0 = Math.floor(idx / map.width);
+      const lq0 = idx - lr0 * map.width;
+      const c = map.getLocal(lq0, lr0);
+      c.elev = Math.max(0.02, c.elev * 0.72);
+      c.featureId = Feature.Riverbank;
+      c.riverDist = 0;
+    }
+  }
+
+  map.forEach((cell, lq, lr) => {
+    if (isWaterId(cell.terrainId) || onPath[map.index(lq, lr)]) return;
+    let beside = false;
+    for (const [dq, dr] of AXIAL6) {
+      const nq = lq + dq;
+      const nr = lr + dr;
+      if (!map.inBoundsLocal(nq, nr)) continue;
+      if (onPath[map.index(nq, nr)]) {
+        beside = true;
+        break;
+      }
+    }
+    if (beside) cell.elev = Math.max(0.02, cell.elev * 0.85);
+  });
+
+  const dist = new Int16Array(map.width * map.height).fill(-1);
+  const queue: number[] = [];
+  map.forEach((cell, lq, lr) => {
+    const idx = map.index(lq, lr);
+    if (onPath[idx]) {
+      dist[idx] = 0;
+      queue.push(idx);
+      cell.riverDist = 0;
+    }
+  });
+  const MAX_RIVER = 6;
+  for (let head = 0; head < queue.length; head++) {
+    const idx = queue[head]!;
+    const d = dist[idx]!;
+    if (d >= MAX_RIVER) continue;
+    const lr = Math.floor(idx / map.width);
+    const lq = idx - lr * map.width;
+    for (const [dq, dr] of AXIAL6) {
+      const nq = lq + dq!;
+      const nr = lr + dr!;
+      if (!map.inBoundsLocal(nq, nr)) continue;
+      const nIdx = map.index(nq, nr);
+      if (dist[nIdx] !== -1) continue;
+      const n = map.getLocal(nq, nr);
+      if (isWaterId(n.terrainId)) continue;
+      dist[nIdx] = d + 1;
+      queue.push(nIdx);
+    }
+  }
+  map.forEach((cell, lq, lr) => {
+    if (isWaterId(cell.terrainId)) {
+      cell.riverDist = 0;
+      return;
+    }
+    const d = dist[map.index(lq, lr)]!;
+    cell.riverDist = d < 0 ? 1 : Math.min(d, MAX_RIVER) / MAX_RIVER;
+  });
 }

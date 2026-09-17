@@ -1,9 +1,11 @@
 /** Synthesize small tiling noise/detail textures (no photo albedos). */
 import { deflateSync } from 'zlib';
 import { writeFileSync, mkdirSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 
-const OUT = '/workspace/Hexbound/public/tex';
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const OUT = join(root, 'public', 'tex');
 mkdirSync(OUT, { recursive: true });
 
 function crcTable() {

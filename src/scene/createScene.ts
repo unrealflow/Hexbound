@@ -41,12 +41,17 @@ uniform vec3 uSkyHorizon;
 void main() {
   vec3 d = normalize(vDir);
   float h = clamp(d.y * 0.5 + 0.5, 0.0, 1.0);
-  vec3 col = mix(uSkyHorizon, uSkyZenith, pow(h, 1.1));
-  // Sun disk + glare (Atmospheric Landscape style)
-  float sun = pow(max(dot(d, normalize(uSunDir)), 0.0), 256.0);
-  float glare = pow(max(dot(d, normalize(uSunDir)), 0.0), 8.0);
-  col += vec3(1.0, 0.95, 0.85) * sun * 1.8;
-  col += vec3(1.0, 0.9, 0.7) * glare * 0.25;
+  // Atmospheric gradient — deeper zenith, warm horizon (Atmospheric Landscape)
+  vec3 col = mix(uSkyHorizon, uSkyZenith, pow(h, 1.25));
+  // Horizon band warm-up
+  col = mix(col, vec3(0.88, 0.82, 0.72), smoothstep(0.45, 0.52, h) * (1.0 - smoothstep(0.55, 0.72, h)) * 0.35);
+  float sunAmt = max(dot(d, normalize(uSunDir)), 0.0);
+  float sun = pow(sunAmt, 512.0);
+  float glare = pow(sunAmt, 16.0);
+  float haze = pow(sunAmt, 4.0);
+  col += vec3(1.0, 0.96, 0.88) * sun * 2.2;
+  col += vec3(1.0, 0.9, 0.7) * glare * 0.45;
+  col += vec3(1.0, 0.85, 0.6) * haze * 0.12;
   gl_FragColor = vec4(col, 1.0);
 }
 `;
@@ -63,15 +68,14 @@ export function createScene(canvas: HTMLCanvasElement): SceneBundle {
   });
 
   const scene = new Scene(engine);
-  // Horizon-ish clear as fallback behind sky dome
-  scene.clearColor = new Color4(0.55, 0.68, 0.82, 1);
+  scene.clearColor = new Color4(0.42, 0.58, 0.78, 1);
   scene.fogMode = Scene.FOGMODE_NONE;
 
-  let orthoSize = 20;
-  // More oblique pitch: lower Y, farther Z
-  const camera = new FreeCamera('orthoCam', new Vector3(0, 28, 36), scene);
+  let orthoSize = 18;
+  // Slightly more pitch so terraces / cliffs read like Humankind shots
+  const camera = new FreeCamera('orthoCam', new Vector3(0, 26, 34), scene);
   camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
-  camera.setTarget(new Vector3(0, 0.4, 0));
+  camera.setTarget(new Vector3(0, 0.5, 0));
   camera.minZ = 0.5;
   camera.maxZ = 280;
 
@@ -84,17 +88,18 @@ export function createScene(canvas: HTMLCanvasElement): SceneBundle {
   };
   applyOrtho();
 
-  const sunDir = new Vector3(-0.55, -0.78, -0.32);
+  // Side-lit sun for form definition (Rainforest kSunDir spirit)
+  const sunDir = new Vector3(-0.62, -0.72, -0.3);
   const sun = new DirectionalLight('sun', sunDir, scene);
-  sun.intensity = 1.25;
-  sun.diffuse = new Color3(1.0, 0.94, 0.84);
+  sun.intensity = 1.55;
+  sun.diffuse = new Color3(1.0, 0.92, 0.78);
 
-  const hemi = new HemisphericLight('hemi', new Vector3(0.15, 1, 0.1), scene);
-  hemi.intensity = 0.55;
-  hemi.groundColor = new Color3(0.2, 0.16, 0.11);
-  hemi.diffuse = new Color3(0.52, 0.64, 0.82);
+  const hemi = new HemisphericLight('hemi', new Vector3(0.1, 1, 0.15), scene);
+  hemi.intensity = 0.42;
+  hemi.groundColor = new Color3(0.22, 0.18, 0.12);
+  hemi.diffuse = new Color3(0.48, 0.62, 0.85);
 
-  // Procedural sky dome (gradient + sun disk) — no photo skybox
+  // Procedural sky dome (gradient + sun disk)
   Effect.ShadersStore['hexSkyVertexShader'] = SKY_VERT;
   Effect.ShadersStore['hexSkyFragmentShader'] = SKY_FRAG;
   const sky = MeshBuilder.CreateSphere('skyDome', { diameter: 200, segments: 16 }, scene);
@@ -110,9 +115,9 @@ export function createScene(canvas: HTMLCanvasElement): SceneBundle {
     },
   );
   skyMat.backFaceCulling = false;
-  skyMat.setVector3('uSunDir', new Vector3(0.55, 0.78, 0.32).normalize());
-  skyMat.setVector3('uSkyZenith', new Vector3(0.28, 0.48, 0.82));
-  skyMat.setVector3('uSkyHorizon', new Vector3(0.72, 0.80, 0.88));
+  skyMat.setVector3('uSunDir', new Vector3(0.62, 0.72, 0.3).normalize());
+  skyMat.setVector3('uSkyZenith', new Vector3(0.18, 0.38, 0.72));
+  skyMat.setVector3('uSkyHorizon', new Vector3(0.72, 0.78, 0.86));
   sky.material = skyMat;
   sky.renderingGroupId = 0;
   scene.onBeforeRenderObservable.add(() => {

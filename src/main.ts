@@ -115,7 +115,7 @@ scene.onPointerObservable.add((pi) => {
   highlight.position.z = w.z;
   const isWater =
     cell.terrainId === Terrain.ShallowWater || cell.terrainId === Terrain.DeepWater;
-  highlight.position.y = isWater ? 0.12 : cell.elev * 1.7 + 0.12;
+  highlight.position.y = isWater ? 0.12 : cell.elev * 2.0 + 0.12;
   highlight.setEnabled(true);
 });
 
@@ -136,3 +136,12 @@ window.addEventListener('resize', () => engine.resize());
 console.info(
   `[Hexbound] map ${MAP_W}×${MAP_H}, chunks=${chunks.meshes.length}, seed=${DEFAULT_SEED}, no runtime textures`,
 );
+
+// Debug hook for headless capture diagnostics
+(window as unknown as { __hexbound?: unknown }).__hexbound = {
+  scene,
+  camera,
+  chunks,
+  map,
+  engine,
+};

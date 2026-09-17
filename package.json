@@ -4,14 +4,18 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host 127.0.0.1",
+    "start": "node scripts/start.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "refs:fetch": "node scripts/fetch-refs.mjs",
     "shots": "node scripts/capture-shots.mjs",
+    "shots:iter": "node scripts/iter-shot.mjs",
+    "glsl:check": "node scripts/check-glsl.mjs",
     "tex:gen": "node scripts/gen-detail-tex.mjs"
   },
   "devDependencies": {
+    "playwright": "^1.63.0",
     "typescript": "~6.0.2",
     "vite": "^8.3.0"
   },

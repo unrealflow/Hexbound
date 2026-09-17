@@ -1,18 +1,40 @@
 import {
   Mesh,
+  RawTexture,
   VertexData,
   type Scene,
 } from '@babylonjs/core';
 import { HEX_SIZE, hexCornerOffset, axialToWorld, AXIAL_DIRS } from './coords';
-import { HexMap, Terrain } from './HexMap';
-import { createHexTerrainMaterial, type HexTerrainMaterial } from '../render/HexTerrainMaterial';
+import { HexMap } from './HexMap';
+import {
+  bindMapData,
+  createHexTerrainMaterial,
+  type HexTerrainMaterial,
+} from '../render/HexTerrainMaterial';
+import {
+  ELEV_SCALE,
+  CLIFF_DROP,
+  RAMP_DROP,
+  edgeNeighbour,
+  isWaterTerrain,
+  isWaterLocal,
+  cellTopY,
+  cornerTopY,
+  rawElev,
+  rawMountainW,
+  rawForestW,
+  weldCornerScalar,
+  avg7,
+} from './terrainContinuity';
 
 export const CHUNK_SIZE = 8;
-export const ELEV_SCALE = 1.7;
+export { ELEV_SCALE, CLIFF_DROP, RAMP_DROP };
 
 export interface ChunkMeshes {
   meshes: Mesh[];
   material: HexTerrainMaterial;
+  mapTex0: RawTexture;
+  mapTex1: RawTexture;
   dispose: () => void;
 }
 
@@ -24,6 +46,7 @@ export interface ChunkMeshes {
  */
 export function meshMap(scene: Scene, map: HexMap): ChunkMeshes {
   const material = createHexTerrainMaterial(scene);
+  const { tex0, tex1 } = bindMapData(material, scene, map);
   const meshes: Mesh[] = [];
 
   const chunksX = Math.ceil(map.width / CHUNK_SIZE);
@@ -39,55 +62,33 @@ export function meshMap(scene: Scene, map: HexMap): ChunkMeshes {
   return {
     meshes,
     material,
+    mapTex0: tex0,
+    mapTex1: tex1,
     dispose: () => {
       for (const m of meshes) m.dispose();
+      tex0.dispose();
+      tex1.dispose();
       material.dispose();
     },
   };
 }
 
-function cellTopY(map: HexMap, localQ: number, localR: number): number {
-  if (!map.inBoundsLocal(localQ, localR)) return 0;
-  const cell = map.getLocal(localQ, localR);
-  const isWater =
-    cell.terrainId === Terrain.ShallowWater || cell.terrainId === Terrain.DeepWater;
-  return isWater ? 0.02 : cell.elev * ELEV_SCALE;
-}
-
-/**
- * Blend corner height with the two neighbors that share this corner.
- * Large elev deltas → keep self height (cliff). Similar elev → soften plateau.
- */
-function cornerTopY(
+/** Water depth at a hex corner: blend with the two corner-sharing neighbors
+ *  so the shallow→deep ramp reads as a gradient instead of hard hex steps. */
+function cornerShoreDist(
   map: HexMap,
   lq: number,
   lr: number,
   corner: number,
-  selfY: number,
-  isWater: boolean,
+  selfD: number,
 ): number {
-  if (isWater) return selfY;
-  const i0 = (corner + 5) % 6;
-  const i1 = corner % 6;
-  const d0 = AXIAL_DIRS[i0]!;
-  const d1 = AXIAL_DIRS[i1]!;
-  const y0 = cellTopY(map, lq + d0.q, lr + d0.r);
-  const y1 = cellTopY(map, lq + d1.q, lr + d1.r);
-
-  // Blend weight drops when neighbor is much lower/higher (cliff preserve)
-  const soft = (ny: number) => {
-    const delta = Math.abs(selfY - ny);
-    return 1 - smoothstep(0.06, 0.32, delta);
-  };
-  const w0 = soft(y0) * 0.28;
-  const w1 = soft(y1) * 0.28;
-  const wSelf = 1 - w0 - w1;
-  return selfY * wSelf + y0 * w0 + y1 * w1;
-}
-
-function smoothstep(e0: number, e1: number, x: number): number {
-  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
-  return t * t * (3 - 2 * t);
+  const at = (q: number, r: number): number =>
+    map.inBoundsLocal(q, r) ? map.getLocal(q, r).shoreDist : 1;
+  const d0 = AXIAL_DIRS[corner]!;
+  const d1 = AXIAL_DIRS[(corner + 1) % 6]!;
+  const n0 = at(lq + d0.q, lr + d0.r);
+  const n1 = at(lq + d1.q, lr + d1.r);
+  return Math.min(1, selfD * 0.34 + n0 * 0.33 + n1 * 0.33);
 }
 
 function buildChunkMesh(
@@ -106,6 +107,9 @@ function buildChunkMesh(
   const moistures: number[] = [];
   const edgeMasks: number[] = [];
   const hexCorners: number[] = [];
+  const shoreDists: number[] = [];
+  const mountainWs: number[] = [];
+  const forestWs: number[] = [];
   const uvs: number[] = [];
 
   let base = 0;
@@ -120,45 +124,60 @@ function buildChunkMesh(
     for (let lq = q0; lq < q1; lq++) {
       const cell = map.getLocal(lq, lr);
       const { x: cxw, z: czw } = axialToWorld(cell.q, cell.r, HEX_SIZE);
-      const isWater =
-        cell.terrainId === Terrain.ShallowWater || cell.terrainId === Terrain.DeepWater;
-      const isDeep = cell.terrainId === Terrain.DeepWater;
-      const yTopFlat = isWater ? (isDeep ? -0.02 : 0.04) : cell.elev * ELEV_SCALE;
+      const isWater = isWaterTerrain(cell.terrainId);
+      // Open water shares one surface level so neighbours never show a step
+      const yTopFlat = isWater ? 0.02 : cell.elev * ELEV_SCALE;
 
-      // Soften flat tops: slight center lift on land / forest
-      const yCenter =
-        isWater
-          ? yTopFlat
-          : yTopFlat + (cell.featureId === 1 || cell.featureId === 2 ? 0.04 : 0.015);
-
-      let minNeighborY = yTopFlat;
-      for (let d = 0; d < 6; d++) {
-        const dir = AXIAL_DIRS[d]!;
-        const ny = cellTopY(map, lq + dir.q, lr + dir.r);
-        minNeighborY = Math.min(minNeighborY, ny);
-      }
-      const skirt = isWater ? 0.22 : 0.3 + cell.elev * 0.6;
-      const yBot = isWater
-        ? -0.2
-        : Math.min(yTopFlat - skirt, minNeighborY - 0.02);
-
-      // Precompute blended corner heights
+      const elevC = avg7(map, lq, lr, rawElev);
+      const mountainW = avg7(map, lq, lr, rawMountainW);
+      const forestW = avg7(map, lq, lr, rawForestW);
       const cornerYs: number[] = [];
+      const cornerElev: number[] = [];
+      const cornerMW: number[] = [];
+      const cornerFW: number[] = [];
       for (let i = 0; i < 6; i++) {
         cornerYs.push(cornerTopY(map, lq, lr, i, yTopFlat, isWater));
+        cornerElev.push(weldCornerScalar(map, lq, lr, i, rawElev));
+        cornerMW.push(weldCornerScalar(map, lq, lr, i, rawMountainW));
+        cornerFW.push(weldCornerScalar(map, lq, lr, i, rawForestW));
+      }
+
+      const cellShore = isWater ? cell.shoreDist : 0;
+      const cornerShore = (i: number): number =>
+        isWater ? cornerShoreDist(map, lq, lr, i, cellShore) : 0;
+      // Center uses the corner average so the depth field stays a smooth
+      // piecewise-linear field (no per-hex center spike).
+      let centerShore = 0;
+      if (isWater) {
+        for (let i = 0; i < 6; i++) centerShore += cornerShore(i);
+        centerShore /= 6;
       }
 
       // --- Top face ---
+      // The fan centre uses the mean of the welded corners, so a cell is not a
+      // tent over its neighbours (that read as per-hex facets).
+      let yCenter = yTopFlat;
+      if (!isWater) {
+        // No per-cell dome: the centre sits on the mean of its welded corners.
+        for (let i = 0; i < 6; i++) yCenter += cornerYs[i]!;
+        yCenter /= 7;
+      }
       const topCenter = base;
       pushV(positions, normals, cxw, yCenter, czw, 0, 1, 0);
-      pushAttr(terrainIds, featureIds, elevs, moistures, edgeMasks, hexCorners, uvs, cell, -1, 0, 0);
+      pushAttr(
+        terrainIds, featureIds, elevs, moistures, edgeMasks, hexCorners, shoreDists, mountainWs, forestWs, uvs,
+        cell, -1, 0, 0, centerShore, elevC, mountainW, forestW,
+      );
       base++;
 
       const topCorners: number[] = [];
       for (let i = 0; i < 6; i++) {
-        const c = hexCornerOffset(i, HEX_SIZE * 1.002);
+        const c = hexCornerOffset(i, HEX_SIZE);
         pushV(positions, normals, cxw + c.x, cornerYs[i]!, czw + c.z, 0, 1, 0);
-        pushAttr(terrainIds, featureIds, elevs, moistures, edgeMasks, hexCorners, uvs, cell, i, c.x, c.z);
+        pushAttr(
+          terrainIds, featureIds, elevs, moistures, edgeMasks, hexCorners, shoreDists, mountainWs, forestWs, uvs,
+          cell, i, c.x, c.z, cornerShore(i), cornerElev[i]!, cornerMW[i]!, cornerFW[i]!,
+        );
         topCorners.push(base);
         base++;
       }
@@ -166,56 +185,85 @@ function buildChunkMesh(
         indices.push(topCenter, topCorners[i]!, topCorners[(i + 1) % 6]!);
       }
 
-      // --- Sides ---
-      if (!isDeep) {
-        for (let i = 0; i < 6; i++) {
-          const dir = AXIAL_DIRS[i]!;
-          const nq = lq + dir.q;
-          const nr = lr + dir.r;
-          const neighborTop = cellTopY(map, nq, nr);
-          const yA = cornerYs[i]!;
-          const yB = cornerYs[(i + 1) % 6]!;
-          const edgeTop = Math.max(yA, yB);
-          const edgeBot = isWater
-            ? yBot
-            : Math.min(edgeTop - 0.1, Math.min(neighborTop, yBot));
+      // --- Sides: skip / ramp / cliff. Only the higher cell emits. ---
+      for (let i = 0; i < 6; i++) {
+        const nb = edgeNeighbour(map, lq, lr, i);
+        if (!nb) continue;
+        const nq = nb[0];
+        const nr = nb[1];
+        const inB = map.inBoundsLocal(nq, nr);
+        const nWater = isWaterLocal(map, nq, nr);
+        if (isWater && (nWater || !inB)) continue;
 
-          const drop = edgeTop - edgeBot;
-          if (!isWater && drop < 0.07 && map.inBoundsLocal(nq, nr)) {
-            const nCell = map.getLocal(nq, nr);
-            const nWater =
-              nCell.terrainId === Terrain.ShallowWater ||
-              nCell.terrainId === Terrain.DeepWater;
-            if (!nWater && Math.abs(nCell.elev - cell.elev) < 0.04) continue;
-          }
+        const neighborTop = cellTopY(map, nq, nr);
+        const yA = cornerYs[i]!;
+        const yB = cornerYs[(i + 1) % 6]!;
+        const yBotA = inB ? cornerTopY(map, nq, nr, i, neighborTop, nWater) : 0.02;
+        const yBotB = inB ? cornerTopY(map, nq, nr, (i + 1) % 6, neighborTop, nWater) : 0.02;
+        const nEdge = Math.max(yBotA, yBotB);
+        const drop = Math.min(yA, yB) - nEdge;
+        // Land->water edges always get a short beach wall so the apron lip
+        // meets the water surface (no gap, no floating block). Land->land
+        // walls still need a real cliff drop.
+        const shoreEdge = inB && !isWater && nWater;
+        if (drop < CLIFF_DROP && !(shoreEdge && drop > RAMP_DROP)) continue;
+        if (inB && !isWater && !nWater && Math.abs(cell.elev - map.getLocal(nq, nr).elev) < 0.07) continue;
+        const selfMid = (yA + yB) * 0.5;
+        if (inB && selfMid < nEdge) continue;
 
-          const c0 = hexCornerOffset(i, HEX_SIZE * 1.002);
-          const c1 = hexCornerOffset((i + 1) % 6, HEX_SIZE * 1.002);
-          const mx = (c0.x + c1.x) * 0.5;
-          const mz = (c0.z + c1.z) * 0.5;
-          const len = Math.hypot(mx, mz) || 1;
-          const nx = mx / len;
-          const nz = mz / len;
+        const c0 = hexCornerOffset(i, HEX_SIZE);
+        const c1 = hexCornerOffset((i + 1) % 6, HEX_SIZE);
+        const mx = (c0.x + c1.x) * 0.5;
+        const mz = (c0.z + c1.z) * 0.5;
+        const len = Math.hypot(mx, mz) || 1;
+        let nx = mx / len;
+        let ny = 0;
+        let nz = mz / len;
+        const nCell = inB ? map.getLocal(nq, nr) : cell;
+        const nShore = inB && nWater ? nCell.shoreDist : 0;
+        const eA = cornerElev[i]!;
+        const eB = cornerElev[(i + 1) % 6]!;
+        const mA = cornerMW[i]!;
+        const mB = cornerMW[(i + 1) % 6]!;
+        const fA = cornerFW[i]!;
+        const fB = cornerFW[(i + 1) % 6]!;
+        const nEA = inB ? weldCornerScalar(map, nq, nr, i, rawElev) : 0;
+        const nEB = inB ? weldCornerScalar(map, nq, nr, (i + 1) % 6, rawElev) : 0;
+        const nMA = inB ? weldCornerScalar(map, nq, nr, i, rawMountainW) : 0;
+        const nMB = inB ? weldCornerScalar(map, nq, nr, (i + 1) % 6, rawMountainW) : 0;
+        const nFA = inB ? weldCornerScalar(map, nq, nr, i, rawForestW) : 0;
+        const nFB = inB ? weldCornerScalar(map, nq, nr, (i + 1) % 6, rawForestW) : 0;
 
-          const i0 = base;
-          pushV(positions, normals, cxw + c0.x, yA, czw + c0.z, nx, 0, nz);
-          pushAttr(terrainIds, featureIds, elevs, moistures, edgeMasks, hexCorners, uvs, cell, i, c0.x, c0.z);
-          base++;
-          const i1 = base;
-          pushV(positions, normals, cxw + c1.x, yB, czw + c1.z, nx, 0, nz);
-          pushAttr(terrainIds, featureIds, elevs, moistures, edgeMasks, hexCorners, uvs, cell, i + 1, c1.x, c1.z);
-          base++;
-          const i2 = base;
-          pushV(positions, normals, cxw + c1.x, edgeBot, czw + c1.z, nx, 0, nz);
-          pushAttr(terrainIds, featureIds, elevs, moistures, edgeMasks, hexCorners, uvs, cell, i + 1, c1.x, c1.z);
-          base++;
-          const i3 = base;
-          pushV(positions, normals, cxw + c0.x, edgeBot, czw + c0.z, nx, 0, nz);
-          pushAttr(terrainIds, featureIds, elevs, moistures, edgeMasks, hexCorners, uvs, cell, i, c0.x, c0.z);
-          base++;
+        const i0 = base;
+        pushV(positions, normals, cxw + c0.x, yA, czw + c0.z, nx, ny, nz);
+        pushAttr(
+          terrainIds, featureIds, elevs, moistures, edgeMasks, hexCorners, shoreDists, mountainWs, forestWs, uvs,
+          cell, i, c0.x, c0.z, cellShore, eA, mA, fA,
+        );
+        base++;
+        const i1 = base;
+        pushV(positions, normals, cxw + c1.x, yB, czw + c1.z, nx, ny, nz);
+        pushAttr(
+          terrainIds, featureIds, elevs, moistures, edgeMasks, hexCorners, shoreDists, mountainWs, forestWs, uvs,
+          cell, i + 1, c1.x, c1.z, cellShore, eB, mB, fB,
+        );
+        base++;
+        const i2 = base;
+        pushV(positions, normals, cxw + c1.x, yBotB, czw + c1.z, nx, ny, nz);
+        pushAttr(
+          terrainIds, featureIds, elevs, moistures, edgeMasks, hexCorners, shoreDists, mountainWs, forestWs, uvs,
+          nCell, i + 1, c1.x, c1.z, nShore, nEB, nMB, nFB,
+        );
+        base++;
+        const i3 = base;
+        pushV(positions, normals, cxw + c0.x, yBotA, czw + c0.z, nx, ny, nz);
+        pushAttr(
+          terrainIds, featureIds, elevs, moistures, edgeMasks, hexCorners, shoreDists, mountainWs, forestWs, uvs,
+          nCell, i, c0.x, c0.z, nShore, nEA, nMA, nFA,
+        );
+        base++;
 
-          indices.push(i0, i1, i2, i0, i2, i3);
-        }
+        indices.push(i0, i1, i2, i0, i2, i3);
       }
 
       cellCount++;
@@ -238,6 +286,9 @@ function buildChunkMesh(
   mesh.setVerticesData('moisture', moistures, false, 1);
   mesh.setVerticesData('edgeMask', edgeMasks, false, 1);
   mesh.setVerticesData('hexCorner', hexCorners, false, 1);
+  mesh.setVerticesData('shoreDist', shoreDists, false, 1);
+  mesh.setVerticesData('mountainW', mountainWs, false, 1);
+  mesh.setVerticesData('forestW', forestWs, false, 1);
 
   mesh.isPickable = true;
   mesh.material = material;
@@ -267,17 +318,27 @@ function pushAttr(
   moistures: number[],
   edgeMasks: number[],
   hexCorners: number[],
+  shoreDists: number[],
+  mountainWs: number[],
+  forestWs: number[],
   uvs: number[],
   cell: { terrainId: number; featureId: number; elev: number; moisture: number; edgeMask: number },
   corner: number,
   lx: number,
   lz: number,
+  shoreDist: number,
+  elevW: number,
+  mountainW: number,
+  forestW: number,
 ): void {
   terrainIds.push(cell.terrainId);
   featureIds.push(cell.featureId);
-  elevs.push(cell.elev);
+  elevs.push(elevW);
   moistures.push(cell.moisture);
   edgeMasks.push(cell.edgeMask);
   hexCorners.push(corner < 0 ? -1 : corner % 6);
+  shoreDists.push(shoreDist);
+  mountainWs.push(mountainW);
+  forestWs.push(forestW);
   uvs.push(lx * 0.5 + 0.5, lz * 0.5 + 0.5);
 }

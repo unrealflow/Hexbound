@@ -20,7 +20,6 @@ vec2 hash22(vec2 p) {
   return fract((p3.xx + p3.yz) * p3.zy);
 }
 
-
 mat2 transpose2(mat2 m) {
   return mat2(m[0][0], m[1][0], m[0][1], m[1][1]);
 }
@@ -108,7 +107,7 @@ vec3 fbmdX(vec2 x) {
   vec2 d = vec2(0.0);
   mat2 m = mat2(1.6, 1.2, -1.2, 1.6);
   mat2 mt = mat2(1.0, 0.0, 0.0, 1.0);
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < 4; i++) {
     vec3 n = noised(x);
     f += a * n.x;
     d += a * (mt * n.yz);
@@ -150,7 +149,7 @@ float ridgeFbm(vec2 p) {
   float v = 0.0;
   float a = 0.5;
   mat2 m = mat2(1.6, 1.2, -1.2, 1.6);
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < 4; i++) {
     float n = 1.0 - abs(valueNoise(p) * 2.0 - 1.0);
     n = n * n;
     v += a * n;
@@ -158,6 +157,42 @@ float ridgeFbm(vec2 p) {
     a *= 0.5;
   }
   return v;
+}
+
+// 2-octave FBM with analytic gradient: (value, d/dx, d/dy)
+vec3 fbm2d(vec2 p) {
+  float v = 0.0;
+  vec2 d = vec2(0.0);
+  float a = 0.5;
+  for (int i = 0; i < 2; i++) {
+    vec3 n = noised(p);
+    v += a * n.x;
+    d += a * n.yz;
+    p *= 2.03;
+    a *= 0.5;
+  }
+  return vec3(v, d);
+}
+
+// Ridged (abs-noise) FBM with analytic gradient — drives relief normals.
+vec3 ridgeFbmd(vec2 p) {
+  float v = 0.0;
+  vec2 d = vec2(0.0);
+  float a = 0.5;
+  mat2 m = mat2(1.6, 1.2, -1.2, 1.6);
+  mat2 mt = mat2(1.0, 0.0, 0.0, 1.0);
+  for (int i = 0; i < 4; i++) {
+    vec3 n = noised(p);
+    float s = n.x * 2.0 - 1.0;
+    float r = 1.0 - abs(s);
+    v += a * r * r;
+    // d(r^2)/dv = 2*r*(-sign(s))*2
+    d += a * (-4.0 * r * sign(s)) * (mt * n.yz);
+    p = m * p;
+    mt = transpose2(m) * mt;
+    a *= 0.5;
+  }
+  return vec3(v, d);
 }
 
 float worley(vec2 p) {
@@ -209,35 +244,72 @@ float warpedFbm(vec2 p, float strength) {
 
 float softEllipsoid(vec3 p, vec3 c, vec3 r) {
   vec3 q = (p - c) / r;
-  return 1.0 - smoothstep(0.75, 1.05, length(q));
+  return 1.0 - smoothstep(0.72, 1.08, length(q));
 }
 
-// Cell-local soft ellipsoid canopy + FBM distort (treesMap idea)
+// Lightweight canopy density (Rainforest treesMap spirit, vertex-safe)
 float canopyField(vec2 xz, float t) {
-  float wind = t * 0.35;
-  vec2 pw = xz + vec2(sin(wind + xz.y) * 0.06, cos(wind * 0.7) * 0.05);
-  vec3 fd = fbmdX(pw * 0.8);
-  pw += 0.12 * fd.yz;
+  vec2 pw = xz + vec2(sin(t * 0.25 + xz.y) * 0.04, cos(t * 0.2 + xz.x) * 0.03);
+  vec2 cell = floor(pw * 1.2);
+  vec2 f = fract(pw * 1.2);
   float dens = 0.0;
-  vec2 cell = floor(pw * 1.35);
-  for (int j = -1; j <= 1; j++) {
-    for (int i = -1; i <= 1; i++) {
-      vec2 gc = cell + vec2(float(i), float(j));
-      vec2 rnd = hash22(gc);
-      vec2 center = (gc + rnd) / 1.35;
-      float rad = 0.32 + rnd.y * 0.38;
-      dens += softEllipsoid(
-        vec3(pw.x, 0.2, pw.y),
-        vec3(center.x, 0.12 + rnd.x * 0.1, center.y),
-        vec3(rad, 0.5, rad * 0.9)
-      );
+  for (int j = 0; j <= 1; j++) {
+    for (int i = 0; i <= 1; i++) {
+      vec2 g = vec2(float(i), float(j));
+      vec2 o = hash22(cell + g);
+      vec2 c = g + o - f;
+      float rad = 0.35 + o.x * 0.28;
+      float d = length(c / vec2(rad, rad * 0.95));
+      dens += 1.0 - smoothstep(0.65, 1.1, d);
     }
   }
   dens = clamp(dens, 0.0, 1.0);
-  return mix(dens, dens * (0.65 + 0.35 * fbm(pw * 3.0)), 0.45);
+  // FBM micro breaks crowns / understory gaps
+  float micro = fbm(pw * 3.5);
+  return clamp(dens * (0.55 + 0.55 * micro), 0.0, 1.0);
 }
 
+// Height / occlusion proxy for canopy lighting
+float canopyHeightFactor(vec2 xz, float t) {
+  float c = canopyField(xz, t);
+  return clamp(c * (0.55 + 0.45 * fbm2(xz * 1.5 + 7.0)), 0.0, 1.0);
+}
+
+// Colored extinction fog (Rainforest fog())
 vec3 fogExtinct(vec3 col, vec3 fogCol, float dist, float density) {
   float f = 1.0 - exp(-dist * density);
   return mix(col, fogCol, clamp(f, 0.0, 1.0));
+}
+
+// Beer-law style chromatic extinction
+vec3 fogChromatic(vec3 col, float dist, float density) {
+  vec3 ext = exp(-dist * density * vec3(1.0, 1.35, 2.1));
+  return col * ext + (1.0 - ext) * vec3(0.62, 0.70, 0.82);
+}
+
+// Pointy-top axial (matches src/hex/coords.ts, HEX_SIZE default 1).
+vec2 worldToAxialFrac(vec2 xz, float size) {
+  float inv = 1.0 / max(size, 0.0001);
+  float q = (0.57735026919 * xz.x - 0.33333334 * xz.y) * inv;
+  float r = (0.66666667 * xz.y) * inv;
+  return vec2(q, r);
+}
+
+vec2 axialRound(vec2 fracQR) {
+  float q = fracQR.x;
+  float r = fracQR.y;
+  float s = -q - r;
+  float rq = floor(q + 0.5);
+  float rr = floor(r + 0.5);
+  float rs = floor(s + 0.5);
+  float dq = abs(rq - q);
+  float dr = abs(rr - r);
+  float ds = abs(rs - s);
+  if (dq > dr && dq > ds) rq = -rr - rs;
+  else if (dr > ds) rr = -rq - rs;
+  return vec2(rq, rr);
+}
+
+float axialDistance(vec2 a, vec2 b) {
+  return (abs(a.x - b.x) + abs(a.x + a.y - b.x - b.y) + abs(a.y - b.y)) * 0.5;
 }

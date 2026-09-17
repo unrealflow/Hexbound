@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Per-iteration capture artifacts written by `npm run shots:iter`
+docs/shots/_*

@@ -1,13 +1,20 @@
 /** Capture Hexbound canvas screenshots.
  * Requires: npm i -D playwright && npx playwright install chrome (or system Google Chrome).
- * Dev server: npm run dev -- --host 127.0.0.1 --port 5188
+ * Dev server: npm run dev  (vite default port 5173)
+ * Usage: npm run shots [-- --port 5173]
  */
 import { chromium } from 'playwright';
 import { mkdirSync, writeFileSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 
-const OUT = '/workspace/Hexbound/docs/shots';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const OUT = join(__dirname, '..', 'docs', 'shots');
 mkdirSync(OUT, { recursive: true });
+
+const portArg = process.argv.indexOf('--port');
+const PORT = portArg >= 0 ? Number(process.argv[portArg + 1]) : 5173;
+const BASE = `http://127.0.0.1:${PORT}/`;
 
 const browser = await chromium.launch({
   channel: 'chrome',
@@ -24,19 +31,26 @@ page.on('console', (m) => {
   if (m.type() === 'error') console.log('ERR', m.text());
 });
 
-await page.goto('http://127.0.0.1:5188/', { waitUntil: 'networkidle', timeout: 60000 });
+await page.goto(BASE, { waitUntil: 'domcontentloaded', timeout: 60000 });
 await page.waitForSelector('#renderCanvas', { timeout: 30000 });
 await page.waitForFunction(() => {
   const t = document.body?.innerText || '';
   return t.includes('Hexbound') && t.includes('Seed');
 }, null, { timeout: 20000 });
-await page.waitForTimeout(4500);
+// Terrain shader can take tens of seconds to compile — wait for mesh readiness.
+await page.waitForFunction(
+  () => {
+    const h = window.__hexbound;
+    return !!h && h.chunks.meshes.every((m) => m.isReady(true));
+  },
+  null,
+  { timeout: 180000, polling: 500 },
+);
+await page.waitForTimeout(1500);
 
 async function shot(name) {
   const path = join(OUT, name);
-  // Full page for UI context
   await page.screenshot({ path, type: 'png' });
-  // Also dump canvas pixels via toDataURL for reliability
   const dataUrl = await page.evaluate(() => {
     const c = document.querySelector('#renderCanvas');
     return c ? c.toDataURL('image/png') : null;
