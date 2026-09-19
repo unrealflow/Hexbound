@@ -1,4 +1,5 @@
 import { Feature, HexMap, Terrain, type FeatureId, type TerrainId } from './HexMap';
+import { AXIAL_DIRS } from './coords';
 
 /** Tiny seeded PRNG (mulberry32). */
 export function mulberry32(seed: number): () => number {
@@ -133,6 +134,42 @@ export function generateMap(opts: MapGenOptions): HexMap {
     }
     elevField[lr * width + lq] = elev;
   });
+
+  // Shore ramp. A corner that touches water is pinned to the sea surface, so the
+  // land's own height at the coast is the whole lip of the beach: at ELEV_SCALE 4
+  // the old coastal heights would stand as a cliff ring around every landmass.
+  // Land within two cells of the coast is scaled down instead, which keeps the
+  // beach profile the map already had, while a mountain that reaches the sea
+  // still ends in a sea cliff.
+  const shoreCells = new Float32Array(width * height).fill(Infinity);
+  const queue: number[] = [];
+  for (let i = 0; i < shoreCells.length; i++) {
+    if (landField[i]! < 0) {
+      shoreCells[i] = 0;
+      queue.push(i);
+    }
+  }
+  for (let head = 0; head < queue.length; head++) {
+    const i = queue[head]!;
+    const lq = i % width;
+    const lr = (i - lq) / width;
+    for (const d of AXIAL_DIRS) {
+      const nq = lq + d.q;
+      const nr = lr + d.r;
+      if (nq < 0 || nr < 0 || nq >= width || nr >= height) continue;
+      const j = nr * width + nq;
+      if (shoreCells[j]! > shoreCells[i]! + 1) {
+        shoreCells[j] = shoreCells[i]! + 1;
+        queue.push(j);
+      }
+    }
+  }
+  for (let i = 0; i < elevField.length; i++) {
+    const dist = shoreCells[i]!;
+    if (!(dist > 0) || !Number.isFinite(dist)) continue;
+    const t = Math.min(1, (dist - 1) / 2);
+    elevField[i] = elevField[i]! * (0.30 + 0.70 * (t * t * (3 - 2 * t)));
+  }
 
   map.forEach((cell, lq, lr) => {
     const q = cell.q;

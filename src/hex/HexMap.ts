@@ -1,6 +1,6 @@
 /** Logical hex cell data for exploration-layer terrain validation. */
 
-import { AXIAL_DIRS, HEX_SIZE, axialToWorld } from './coords';
+import { AXIAL_DIRS, HEX_SIZE, axialToWorld, hexCornerOffset } from './coords';
 
 export const Terrain = {
   Plains: 0,
@@ -76,6 +76,20 @@ export interface HexCell {
    */
   landShoreDist: number;
 }
+
+/** Kernel radii for packMapTextures, in cell steps (cell centres are sqrt(3)
+ *  HEX_SIZE apart).
+ *  AREA smooths the per-cell fields across their neighbours, which is what stops
+ *  a cell painting as a flat hexagon. BAND smooths the distance fields that draw
+ *  the shoreline and the foam about as much as the 4x4 cubic B-spline stencil
+ *  they used before (an effective 2x2 cell average, equivalent to a centre weight
+ *  of 0.44 here): pre-filtering them harder smeared the foam line into a wide
+ *  shelf, and not filtering them at all left their window a sliver pinned to the
+ *  cell boundary. */
+const AREA_RADIUS_CELLS = 2.2;
+const BAND_RADIUS_CELLS = 1.8;
+/** World distance at which the baked signed shore distance saturates. */
+const SHORE_RANGE = 2.5;
 
 export class HexMap {
   readonly width: number;
@@ -235,29 +249,206 @@ export class HexMap {
     return any ? mx - mn : 0;
   }
 
-  /**
-   * Pack two WxH RGBA8 map fields for GPU upload.
-   * tex1.B = water ? 0.5 + 0.5*shoreDist : 0.5 - 0.5*landShoreDist (signed
-   *                        shore distance, 0 at the waterline)
-   * tex1.R = water ? shoreDist : riverDist (both world-distance fields).
-   */
-  packMapTexels(): { tex0: Uint8Array; tex1: Uint8Array } {
-    const n = this.width * this.height;
-    const tex0 = new Uint8Array(n * 4);
-    const tex1 = new Uint8Array(n * 4);
-    const toU8 = (x: number) => Math.max(0, Math.min(255, Math.round(x * 255)));
+  /** Per-cell channel values in packed order, as floats for filtering. */
+  private cellChannels(): Float32Array {
+    const ch = new Float32Array(this.width * this.height * 8);
     const isWater = (t: number) => t === Terrain.ShallowWater || t === Terrain.DeepWater;
     this.forEach((cell, lq, lr) => {
-      const i = this.index(lq, lr) * 4;
-      tex0[i] = toU8(cell.terrainId / 8);
-      tex0[i + 1] = toU8(cell.featureId / 8);
-      tex0[i + 2] = toU8(cell.elev);
-      tex0[i + 3] = toU8(cell.moisture);
-      tex1[i] = toU8(isWater(cell.terrainId) ? cell.shoreDist : cell.riverDist);
-      tex1[i + 1] = toU8(cell.forestCover);
-      tex1[i + 2] = toU8(isWater(cell.terrainId) ? 1 : cell.edgeMask);
-      tex1[i + 3] = toU8(this.neighborElevRange(lq, lr));
+      const i = this.index(lq, lr) * 8;
+      ch[i] = cell.terrainId / 8;
+      ch[i + 1] = cell.featureId / 8;
+      ch[i + 2] = cell.elev;
+      ch[i + 3] = cell.moisture;
+      ch[i + 4] = isWater(cell.terrainId) ? cell.shoreDist : cell.riverDist;
+      ch[i + 5] = cell.forestCover;
+      ch[i + 6] = isWater(cell.terrainId) ? 1 : cell.edgeMask;
+      ch[i + 7] = this.neighborElevRange(lq, lr);
     });
-    return { tex0, tex1 };
+    return ch;
+  }
+
+  /**
+   * Hex edges between a water cell and a non-water cell, as segments carrying the
+   * outward (seaward) normal: [ax, az, bx, bz, nx, nz] per segment. Used to bake
+   * a real signed distance to the waterline, because the per-cell shore field is
+   * constant over the whole sea, so depth and foam bands could only ever be the
+   * interpolated sliver between a water and a land cell.
+   */
+  private shoreSegments(): Float64Array {
+    const segs: number[] = [];
+    const isWater = (t: number) => t === Terrain.ShallowWater || t === Terrain.DeepWater;
+    this.forEach((cell, lq, lr) => {
+      if (!isWater(cell.terrainId)) return;
+      const cq = this.originQ + lq;
+      const cr = this.originR + lr;
+      const c = axialToWorld(cq, cr);
+      for (const d of AXIAL_DIRS) {
+        const n = this.get(cq + d.q, cr + d.r);
+        // The map border is a hard edge, not a coastline.
+        if (!n || isWater(n.terrainId)) continue;
+        const nc = axialToWorld(cq + d.q, cr + d.r);
+        const shared: { x: number; z: number }[] = [];
+        for (let i = 0; i < 6; i++) {
+          const o = hexCornerOffset(i);
+          const px = c.x + o.x;
+          const pz = c.z + o.z;
+          if (Math.hypot(px - nc.x, pz - nc.z) < 1.05) shared.push({ x: px, z: pz });
+        }
+        if (shared.length !== 2) continue;
+        const [a, b] = shared;
+        const mx = (a.x + b.x) / 2;
+        const mz = (a.z + b.z) / 2;
+        const nx = c.x - mx;
+        const nz = c.z - mz;
+        const len = Math.hypot(nx, nz) || 1;
+        segs.push(a.x, a.z, b.x, b.z, nx / len, nz / len);
+      }
+    });
+    return Float64Array.from(segs);
+  }
+
+  /** Signed distance to the nearest shore segment, positive on the water side. */
+  private static shoreDistance(segs: Float64Array, x: number, z: number): number {
+    let best = Infinity;
+    let sign = -1;
+    for (let i = 0; i < segs.length; i += 6) {
+      const ax = segs[i];
+      const az = segs[i + 1];
+      const vx = segs[i + 2] - ax;
+      const vz = segs[i + 3] - az;
+      const wx = x - ax;
+      const wz = z - az;
+      const len2 = vx * vx + vz * vz;
+      let t = len2 > 0 ? (wx * vx + wz * vz) / len2 : 0;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const dx = wx - t * vx;
+      const dz = wz - t * vz;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < best) {
+        best = d2;
+        sign = dx * segs[i + 4] + dz * segs[i + 5] >= 0 ? 1 : -1;
+      }
+    }
+    return best === Infinity ? 0 : sign * Math.sqrt(best);
+  }
+
+  /**
+   * Resample four channels at `sub` x `sub` positions per cell. A channel is
+   * normally the weighted average of the cells around the subsample's own world
+   * position, kernel (1 - d/r)^3 with d in cell steps and a per-channel radius r:
+   * the kernel reaches zero at r with zero slope, so the field stays continuous
+   * where a cell enters or leaves the support, and because each subsample mixes
+   * its neighbours the result has no per-cell plateau for the shader to draw as a
+   * hexagon. `{ dist: true }` instead stores the signed shore distance, positive
+   * offshore on a scale that saturates SHORE_RANGE world units out.
+   */
+  private bakeRGBA(spec: { ch?: number; r?: number; dist?: boolean }[], sub: number): {
+    data: Uint8Array;
+    width: number;
+    height: number;
+  } {
+    const w = this.width * sub;
+    const h = this.height * sub;
+    const out = new Uint8Array(w * h * 4);
+    const ch = this.cellChannels();
+    const spacing = Math.sqrt(3) * HEX_SIZE;
+    const radii = spec.map((s) => (s.r ?? 0) * spacing);
+    const span = Math.ceil(Math.max(...spec.map((s) => s.r ?? 0)));
+    const segs = spec.some((s) => s.dist) ? this.shoreSegments() : new Float64Array(0);
+    const world: { x: number; z: number }[] = [];
+    for (let r = 0; r < this.height; r++) {
+      for (let q = 0; q < this.width; q++) {
+        world.push(axialToWorld(this.originQ + q, this.originR + r));
+      }
+    }
+    const toU8 = (x: number) => Math.max(0, Math.min(255, Math.round(x * 255)));
+    const acc = new Float64Array(4);
+    const wSum = new Float64Array(4);
+    for (let lr = 0; lr < this.height; lr++) {
+      for (let lq = 0; lq < this.width; lq++) {
+        for (let j = 0; j < sub; j++) {
+          for (let i = 0; i < sub; i++) {
+            // Axial coords of this subsample: a cell centre sits at its integer
+            // axial coordinate, so the subsamples straddle it at +/-(i+0.5)/sub.
+            const p = axialToWorld(
+              this.originQ + lq - 0.5 + (i + 0.5) / sub,
+              this.originR + lr - 0.5 + (j + 0.5) / sub,
+            );
+            acc.fill(0);
+            wSum.fill(0);
+            for (let dr = -span; dr <= span; dr++) {
+              for (let dq = -span; dq <= span; dq++) {
+                const cq = lq + dq;
+                const cr = lr + dr;
+                if (!this.inBoundsLocal(cq, cr)) continue;
+                const cw = world[cr * this.width + cq];
+                const dx = cw.x - p.x;
+                const dz = cw.z - p.z;
+                const d = Math.sqrt(dx * dx + dz * dz);
+                const ci = this.index(cq, cr) * 8;
+                for (let k = 0; k < spec.length; k++) {
+                  if (spec[k].dist) continue;
+                  if (d >= radii[k]) continue;
+                  const t = 1 - d / radii[k];
+                  const wt = t * t * t;
+                  wSum[k] += wt;
+                  acc[k] += wt * ch[ci + (spec[k].ch as number)];
+                }
+              }
+            }
+            const o = ((lr * sub + j) * w + lq * sub + i) * 4;
+            for (let k = 0; k < spec.length; k++) {
+              if (spec[k].dist) {
+                const sd = HexMap.shoreDistance(segs, p.x, p.z) / SHORE_RANGE;
+                out[o + k] = toU8(0.5 + 0.5 * Math.max(-1, Math.min(1, sd)));
+              } else {
+                out[o + k] = wSum[k] > 0 ? toU8(acc[k] / wSum[k]) : 0;
+              }
+            }
+          }
+        }
+      }
+    }
+    return { data: out, width: w, height: h };
+  }
+
+  /**
+   * Pack the map into two RGBA textures at `sub` x `sub` samples per cell:
+   *   tex0 = terrainId/8, featureId/8, elev, moisture, filtered at area scale
+   *   tex1 = water ? shoreDist : riverDist, forestCover, signed shore distance,
+   *          neighbourElevRange
+   * The fragment takes one bilinear tap per texture. The 4x4 cell stencil this
+   * replaced averaged 16 cells at C2 and still painted each cell as a flat
+   * hexagon, because the data itself is one value per cell: pre-filtering across
+   * cells is what removes that, and it is cheaper by 30 texture fetches.
+   *
+   * A second, coarser level of the same fields was tried as a dual-scale
+   * fine-minus-coarse boost. It measurably made things worse (rim-vs-interior
+   * luminance went from +0.02 to +0.13): the fine level varies inside a cell
+   * while the coarse one does not, so their difference is itself cell aligned and
+   * boosting it re-amplifies exactly the structure the pre-filter removed.
+   */
+  packMapTextures(sub = 4): { tex0: Uint8Array; tex1: Uint8Array; width: number; height: number } {
+    const A = AREA_RADIUS_CELLS;
+    const B = BAND_RADIUS_CELLS;
+    const a = this.bakeRGBA(
+      [
+        { ch: 0, r: A },
+        { ch: 1, r: A },
+        { ch: 2, r: A },
+        { ch: 3, r: A },
+      ],
+      sub,
+    );
+    const b = this.bakeRGBA(
+      [
+        { ch: 4, r: B },
+        { ch: 5, r: A },
+        { dist: true },
+        { ch: 7, r: A },
+      ],
+      sub,
+    );
+    return { tex0: a.data, tex1: b.data, width: a.width, height: a.height };
   }
 }

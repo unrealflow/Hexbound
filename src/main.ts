@@ -7,11 +7,12 @@ import {
 } from '@babylonjs/core';
 import { createScene, panCamera } from './scene/createScene';
 import { axialToWorld, worldToAxial } from './hex/coords';
+import { heightAt, pickTerrain } from './hex/terrainContinuity';
 import { generateMap } from './hex/mapgen';
 import { meshMap, type ChunkMeshes } from './hex/ChunkMesher';
 import { updateTerrainMaterial } from './render/HexTerrainMaterial';
 import { createDebugPanel } from './ui/debugPanel';
-import { Terrain, type HexMap } from './hex/HexMap';
+import { type HexMap } from './hex/HexMap';
 
 const DEFAULT_SEED = 20260916;
 const MAP_W = 40;
@@ -97,10 +98,15 @@ scene.onPointerObservable.add((pi) => {
   if (pi.event.button !== 0) return;
 
   const ray = scene.createPickingRay(scene.pointerX, scene.pointerY, null, camera);
-  if (Math.abs(ray.direction.y) < 1e-6) return;
-  const t = -ray.origin.y / ray.direction.y;
-  if (t < 0) return;
-  const hit = ray.origin.add(ray.direction.scale(t));
+  // Picking follows the CPU height field, not the render mesh: the mesh is the
+  // displaced approximation of that field, so picking it (or the y = 0 plane)
+  // selected a hex offset from the one under the cursor on any slope.
+  const hit = pickTerrain(map, ray.origin, ray.direction);
+  if (!hit) {
+    highlight.setEnabled(false);
+    panel.setSelected(null);
+    return;
+  }
   const axial = worldToAxial(hit.x, hit.z);
   const cell = map.get(axial.q, axial.r);
   if (!cell) {
@@ -113,9 +119,7 @@ scene.onPointerObservable.add((pi) => {
   const w = axialToWorld(cell.q, cell.r);
   highlight.position.x = w.x;
   highlight.position.z = w.z;
-  const isWater =
-    cell.terrainId === Terrain.ShallowWater || cell.terrainId === Terrain.DeepWater;
-  highlight.position.y = isWater ? 0.12 : cell.elev * 2.0 + 0.12;
+  highlight.position.y = heightAt(map, w.x, w.z) + 0.10;
   highlight.setEnabled(true);
 });
 
@@ -144,4 +148,13 @@ console.info(
   chunks,
   map,
   engine,
+  // The two calls the pointer handler makes, so headless checks exercise the
+  // same picking path the app uses.
+  terrainHeight: (x: number, z: number, mode?: 'shader' | 'preview' | 'none') =>
+    heightAt(map, x, z, mode),
+  pickTerrain: (
+    o: { x: number; y: number; z: number },
+    d: { x: number; y: number; z: number },
+    mode?: 'shader' | 'preview' | 'none',
+  ) => pickTerrain(map, o, d, 120, mode),
 };

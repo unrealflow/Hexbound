@@ -15,6 +15,8 @@ import { HEX_SIZE } from '../hex/coords';
 import type { HexMap } from '../hex/HexMap';
 
 const SHADER_NAME = 'hexTerrain';
+/** Subsamples per cell in the baked map data textures. */
+export const MAP_SUB = 4;
 
 function injectNoise(src: string): string {
   return src.replace('/*__NOISE__*/', noiseSrc);
@@ -62,9 +64,9 @@ export function createHexTerrainMaterial(scene: Scene): HexTerrainMaterial {
         'moisture',
         'edgeMask',
         'hexCorner',
-        'shoreDist',
         'mountainW',
         'forestW',
+        'dispW',
       ],
       uniforms: [
         'world',
@@ -83,6 +85,7 @@ export function createHexTerrainMaterial(scene: Scene): HexTerrainMaterial {
         'uMapOrigin',
         'uMapSize',
         'uHexSize',
+        'uDbgField',
       ],
       samplers: [
         'uNoiseTex',
@@ -121,6 +124,8 @@ export function createHexTerrainMaterial(scene: Scene): HexTerrainMaterial {
   mat.setVector2('uMapOrigin', new Vector2(0, 0));
   mat.setVector2('uMapSize', new Vector2(40, 32));
   mat.setFloat('uHexSize', HEX_SIZE);
+  // Field view for diagnosis; 0 is the normal shading path.
+  mat.setFloat('uDbgField', 0);
 
   return mat;
 }
@@ -144,15 +149,15 @@ function createMapDataTex(scene: Scene, data: Uint8Array, width: number, height:
   return tex;
 }
 
-/** Upload the two NEAREST+CLAMP map fields. Caller must dispose the returned textures. */
+/** Upload the map data fields. Caller must dispose the returned textures. */
 export function bindMapData(
   mat: HexTerrainMaterial,
   scene: Scene,
   map: HexMap,
 ): { tex0: RawTexture; tex1: RawTexture } {
-  const { tex0, tex1 } = map.packMapTexels();
-  const t0 = createMapDataTex(scene, tex0, map.width, map.height, 'uMapTex0');
-  const t1 = createMapDataTex(scene, tex1, map.width, map.height, 'uMapTex1');
+  const { tex0, tex1, width, height } = map.packMapTextures(MAP_SUB);
+  const t0 = createMapDataTex(scene, tex0, width, height, 'uMapTex0');
+  const t1 = createMapDataTex(scene, tex1, width, height, 'uMapTex1');
   mat.setTexture('uMapTex0', t0);
   mat.setTexture('uMapTex1', t1);
   mat.setVector2('uMapOrigin', new Vector2(map.originQ, map.originR));

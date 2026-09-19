@@ -11,7 +11,6 @@ varying float vEdgeMask;
 varying float vHexCorner;
 varying float vFaceKind;
 varying float vHeightAO;
-varying float vShoreDist;
 
 uniform float uTime;
 uniform vec3 uSunDir;
@@ -23,6 +22,10 @@ uniform float uEnableFog;
 uniform float uShowWireHint;
 uniform float uUseDetailTex;
 uniform float uElevScale;
+// Field view for diagnosis: 0 = normal shading, 1..12 = one packed field as
+// greyscale (see the block at the end of main). Captured from straight above it
+// shows which field a lattice-aligned artifact comes from.
+uniform float uDbgField;
 
 uniform sampler2D uNoiseTex;
 uniform sampler2D uGrassTex;
@@ -45,7 +48,6 @@ float gSandW;
 float gTundraW;
 float gMtnW;
 float gFidW;
-float gWetInv;
 /** Relief-perturbed normal built from the continuous world-xz displacement
  *  field; per-vertex gradients are constant per cell fan, so interpolating them
  *  creased the shading along every hex edge. */
@@ -79,7 +81,11 @@ vec3 microDetail(vec3 albedo, sampler2D tex, vec2 p, float scale, float amp, flo
 // ---------------------------------------------------------------------------
 vec3 rockStrata(vec3 wp, float elev, float slope) {
   vec2 p = wp.xz;
-  float bandCoord = wp.y * 4.5 + fbm2(p * 1.2) * 2.2;
+  // Thicker, more strongly warped bedding than the first version: the
+  // references (humankind-cliffs-plateaus, civ7-waterfall-cliffs) show a few
+  // chunky wavy strata per cliff, not fine planks — fine straight bands read
+  // as wood grain / cardboard.
+  float bandCoord = wp.y * 3.0 + fbm2(p * 1.2) * 3.2;
   float bandVar = mod(floor(bandCoord), 5.0) / 5.0;
   float bandFrac = fract(bandCoord);
 
@@ -93,9 +99,9 @@ vec3 rockStrata(vec3 wp, float elev, float slope) {
   rock = mix(rock, rockBrick, smoothstep(0.25, 0.0, abs(bandVar - 0.2)) * 0.65);
 
   float bedding = smoothstep(0.07, 0.0, abs(bandFrac - 0.5));
-  rock *= 1.0 - bedding * 0.2;
+  rock *= 1.0 - bedding * 0.12;
   float crack = ridgeFbm(p * 1.1 + wp.y * 0.25);
-  rock *= 0.84 + 0.22 * crack;
+  rock *= 0.88 + 0.16 * crack;
   rock *= 0.92 + 0.12 * fbm2(p * 3.0 + wp.y);
 
   if (uUseDetailTex > 0.5) {
@@ -105,7 +111,7 @@ vec3 rockStrata(vec3 wp, float elev, float slope) {
   return rock;
 }
 
-vec3 biomePalette(float tid, float moist, float elev) {
+vec3 biomePalette(float tid, float moist, float elev, float waterGate) {
   float m = clamp(moist, 0.0, 1.0);
   float e = clamp(elev, 0.0, 1.0);
   vec3 plains = mix(vec3(0.36, 0.46, 0.15), vec3(0.58, 0.60, 0.24), 0.2 + m * 0.6);
@@ -123,141 +129,63 @@ vec3 biomePalette(float tid, float moist, float elev) {
   float w3 = clamp(1.0 - abs(tid - 3.0), 0.0, 1.0);
   float w4 = clamp(1.0 - abs(tid - 4.0), 0.0, 1.0);
   float w5 = clamp(1.0 - abs(tid - 5.0), 0.0, 1.0);
-  float w6 = clamp(1.0 - abs(tid - 6.0), 0.0, 1.0);
-  float w7 = clamp(1.0 - abs(tid - 7.0), 0.0, 1.0);
-  vec3 c = w0 * plains + w1 * grass + w2 * sand + w3 * tundra + w4 * hills + w5 * rock + (w6 + w7) * water;
-  return c / max(w0 + w1 + w2 + w3 + w4 + w5 + w6 + w7, 0.001);
+  // Split the palettes by the shore field, not by the terrain id: the id is
+  // pre-filtered, so it crosses the water threshold about a cell inland and the
+  // land side of every coast would pick up the water palette again. Renormalising
+  // each medium separately also keeps land colour free of water tint instead of
+  // relying on the caller to subtract it back out.
+  float fw = clamp(waterGate, 0.0, 1.0);
+  float wl = w0 + w1 + w2 + w3 + w4 + w5;
+  vec3 landCol = (w0 * plains + w1 * grass + w2 * sand + w3 * tundra + w4 * hills + w5 * rock) / max(wl, 1e-4);
+  return mix(landCol, water, fw);
 }
 
 float biomeHeight(float tid, float elev) {
   return mix(0.35 + 0.65 * elev, 0.22, smoothstep(5.5, 6.5, tid));
 }
 
-void considerNbr(vec2 cellQR, vec2 axialP, inout vec2 nA, inout vec2 nB, inout float dA, inout float dB) {
-  float dd = axialDistance(axialP, cellQR);
-  if (dd < dA) {
-    dB = dA;
-    nB = nA;
-    dA = dd;
-    nA = cellQR;
-  } else if (dd < dB) {
-    dB = dd;
-    nB = cellQR;
-  }
-}
-
-// Uniform cubic B-spline basis, t in [0,1): weights for the nodes
-// floor(x)-1 .. floor(x)+2. Sums to 1 exactly and is C2 in x.
-vec4 bspWeights(float t) {
-  float t2 = t * t;
-  float t3 = t2 * t;
-  return vec4(
-    (1.0 - t) * (1.0 - t) * (1.0 - t) / 6.0,
-    (3.0 * t3 - 6.0 * t2 + 4.0) / 6.0,
-    (-3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0) / 6.0,
-    t3 / 6.0);
-}
-
-void addMapSample(vec2 cellQR, float w, inout float wSum, inout vec3 pal, inout vec3 palW, inout float waterW, inout float forestW, inout float shoreW, inout float wetInv, inout float reliefW, inout float elevW, inout float moistW, inout float fidW, inout float sandW, inout float mtnW, inout float tundraW, inout float sdW) {
-  vec2 uv = (cellQR - uMapOrigin + 0.5) / max(uMapSize, vec2(1.0));
-  vec4 t0 = texture2D(uMapTex0, uv);
-  vec4 t1 = texture2D(uMapTex1, uv);
-  float tid = t0.r * 8.0;
-  // Water flag from the terrain id, not from t1.b: t1.b now carries the signed
-  // shore distance (water positive, land negative).
-  float isWaterCell = (tid > 5.5) ? 1.0 : 0.0;
-  vec3 pcol = biomePalette(tid, t0.a, t0.b);
-  pal += w * pcol;
-  palW += w * isWaterCell * pcol;
-  waterW += w * isWaterCell;
-  forestW += w * t1.g;
-  shoreW += w * t1.r;
-  wetInv += w * isWaterCell;
-  sdW += w * ((t1.b - 0.5) * 2.0);
-  reliefW += w * t1.a;
-  elevW += w * t0.b;
-  moistW += w * t0.a;
-  fidW += w * (t0.g * 8.0);
-  sandW += w * clamp(1.0 - abs(tid - 2.0), 0.0, 1.0);
-  mtnW += w * clamp(1.0 - abs(tid - 5.0), 0.0, 1.0);
-  tundraW += w * clamp(1.0 - abs(tid - 3.0), 0.0, 1.0);
-  wSum += w;
-}
-
 // ---------------------------------------------------------------------------
-// Terrain albedo — hex-weighted palettes, world-space detail once
+// Terrain albedo — one bilinear tap per baked map texture, world-space detail
 // ---------------------------------------------------------------------------
 vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 n, float camDist) {
-  float slope = 1.0 - clamp(n.y, 0.0, 1.0);
+  // Assigned from the relief normal below: the geometric normal is the cell's
+  // flat fan, so a slope taken from it varies cell to cell and paints the lattice
+  // into every slope-driven term (rock, meadow, snow, cliff strata).
+  float slope = 0.0;
   vec2 p = wp.xz;
   float hexSize = max(uHexSize, 0.0001);
   vec2 axialP = worldToAxialFrac(p, hexSize);
-  // Domain-warp the cell lookup: the data texture has one sample per cell, so
-  // an unwarped lookup paints every biome/forest patch with the shape of a
-  // hexagon. A warp of ~1.5 cells distorts the patch outlines into organic
-  // shapes while keeping the data itself untouched.
-  vec2 warp = (vec2(fbm2(p * 0.21 + 3.0), fbm2(p * 0.21 + 29.0)) - 0.5) * 1.5;
-  vec2 warpFine = (vec2(fbm2(p * 0.62 + 13.0), fbm2(p * 0.62 + 47.0)) - 0.5) * 0.8;
+  // Domain-warp the lookup so biome and forest outlines are organic rather than
+  // following the axial lattice. The bake already pre-filters the data, so this
+  // only has to break the residual cell alignment, not hide whole hexagons.
+  vec2 warp = (vec2(fbm2(p * 0.21 + 3.0), fbm2(p * 0.21 + 29.0)) - 0.5) * 0.46;
+  vec2 warpFine = (vec2(fbm2(p * 0.62 + 13.0), fbm2(p * 0.62 + 47.0)) - 0.5) * 0.24;
   vec2 axialPw = axialP + warp + warpFine;
 
-  float wSum = 0.0;
-  vec3 pal = vec3(0.0);
-  vec3 palW = vec3(0.0);
-  float waterW = 0.0;
-  float forestW = 0.0;
-  float shoreW = 0.0;
-  float wetInv = 0.0;
-  float reliefW = 0.0;
-  float elevW = 0.0;
-  float moistW = 0.0;
-  float fidW = 0.0;
-  float sandW = 0.0;
-  float mtnW = 0.0;
-  float tundraW = 0.0;
-  float sdW = 0.0;
-  // 4x4 cubic B-spline stencil (constant indices, ES1-safe): C2 partition of
-  // unity, so the blend neither steps at a cell border (the truncated Gaussian
-  // swapped its cell set there) nor stays flat inside a cell.
-  vec2 f0 = floor(axialPw);
-  vec4 wx = bspWeights(axialPw.x - f0.x);
-  vec4 wz = bspWeights(axialPw.y - f0.y);
-  vec2 base = f0 - vec2(1.0, 1.0);
-  addMapSample(base + vec2(0.0, 0.0), wx[0] * wz[0], wSum, pal, palW, waterW, forestW, shoreW, wetInv, reliefW, elevW, moistW, fidW, sandW, mtnW, tundraW, sdW);
-  addMapSample(base + vec2(0.0, 1.0), wx[0] * wz[1], wSum, pal, palW, waterW, forestW, shoreW, wetInv, reliefW, elevW, moistW, fidW, sandW, mtnW, tundraW, sdW);
-  addMapSample(base + vec2(0.0, 2.0), wx[0] * wz[2], wSum, pal, palW, waterW, forestW, shoreW, wetInv, reliefW, elevW, moistW, fidW, sandW, mtnW, tundraW, sdW);
-  addMapSample(base + vec2(0.0, 3.0), wx[0] * wz[3], wSum, pal, palW, waterW, forestW, shoreW, wetInv, reliefW, elevW, moistW, fidW, sandW, mtnW, tundraW, sdW);
-  addMapSample(base + vec2(1.0, 0.0), wx[1] * wz[0], wSum, pal, palW, waterW, forestW, shoreW, wetInv, reliefW, elevW, moistW, fidW, sandW, mtnW, tundraW, sdW);
-  addMapSample(base + vec2(1.0, 1.0), wx[1] * wz[1], wSum, pal, palW, waterW, forestW, shoreW, wetInv, reliefW, elevW, moistW, fidW, sandW, mtnW, tundraW, sdW);
-  addMapSample(base + vec2(1.0, 2.0), wx[1] * wz[2], wSum, pal, palW, waterW, forestW, shoreW, wetInv, reliefW, elevW, moistW, fidW, sandW, mtnW, tundraW, sdW);
-  addMapSample(base + vec2(1.0, 3.0), wx[1] * wz[3], wSum, pal, palW, waterW, forestW, shoreW, wetInv, reliefW, elevW, moistW, fidW, sandW, mtnW, tundraW, sdW);
-  addMapSample(base + vec2(2.0, 0.0), wx[2] * wz[0], wSum, pal, palW, waterW, forestW, shoreW, wetInv, reliefW, elevW, moistW, fidW, sandW, mtnW, tundraW, sdW);
-  addMapSample(base + vec2(2.0, 1.0), wx[2] * wz[1], wSum, pal, palW, waterW, forestW, shoreW, wetInv, reliefW, elevW, moistW, fidW, sandW, mtnW, tundraW, sdW);
-  addMapSample(base + vec2(2.0, 2.0), wx[2] * wz[2], wSum, pal, palW, waterW, forestW, shoreW, wetInv, reliefW, elevW, moistW, fidW, sandW, mtnW, tundraW, sdW);
-  addMapSample(base + vec2(2.0, 3.0), wx[2] * wz[3], wSum, pal, palW, waterW, forestW, shoreW, wetInv, reliefW, elevW, moistW, fidW, sandW, mtnW, tundraW, sdW);
-  addMapSample(base + vec2(3.0, 0.0), wx[3] * wz[0], wSum, pal, palW, waterW, forestW, shoreW, wetInv, reliefW, elevW, moistW, fidW, sandW, mtnW, tundraW, sdW);
-  addMapSample(base + vec2(3.0, 1.0), wx[3] * wz[1], wSum, pal, palW, waterW, forestW, shoreW, wetInv, reliefW, elevW, moistW, fidW, sandW, mtnW, tundraW, sdW);
-  addMapSample(base + vec2(3.0, 2.0), wx[3] * wz[2], wSum, pal, palW, waterW, forestW, shoreW, wetInv, reliefW, elevW, moistW, fidW, sandW, mtnW, tundraW, sdW);
-  addMapSample(base + vec2(3.0, 3.0), wx[3] * wz[3], wSum, pal, palW, waterW, forestW, shoreW, wetInv, reliefW, elevW, moistW, fidW, sandW, mtnW, tundraW, sdW);
-  wSum = max(wSum, 0.0001);
-  pal /= wSum;
-  palW /= wSum;
-  // Palette per medium: the water palette bleeding onto land pixels was the last
-  // bright rim at the coast (measured +0.014 luma on the land side).
-  float waterFrac = clamp(waterW / wSum, 0.0, 1.0);
-  vec3 palLand = (pal - palW) / max(1.0 - waterFrac, 0.02);
-  vec3 palWater = palW / max(waterFrac, 0.02);
-  waterW /= wSum;
-  forestW /= wSum;
-  shoreW /= wSum;
-  wetInv /= wSum;
-  reliefW /= wSum;
-  elevW /= wSum;
-  moistW /= wSum;
-  fidW /= wSum;
-  sandW /= wSum;
-  mtnW /= wSum;
-  tundraW /= wSum;
-  sdW /= wSum;
+  vec2 uv = (axialPw - uMapOrigin + 0.5) / max(uMapSize, vec2(1.0));
+  vec4 t0 = texture2D(uMapTex0, uv);
+  vec4 t1 = texture2D(uMapTex1, uv);
+
+  float tidS = t0.r * 8.0;
+  float fidW = t0.g * 8.0;
+  float elevW = t0.b;
+  float moistW = t0.a;
+  // t1.r/t1.b are baked unfiltered: the shore fields move by a whole value inside
+  // one cell, and pre-filtering them turned the foam line into a wide shelf.
+  float sdW = (t1.b - 0.5) * 2.0;
+  float forestW = t1.g;
+  float reliefW = t1.a;
+  float shoreW = t1.r;
+  // Medium split from the shore field (see biomePalette): t1.b is 1 on water and
+  // expires away from it on land, so this crosses at the waterline itself.
+  float waterFrac = smoothstep(-0.12, 0.12, sdW);
+  vec3 palWater = biomePalette(tidS, moistW, elevW, 1.0);
+  vec3 palLand = biomePalette(tidS, moistW, elevW, 0.0);
+  float waterW = waterFrac;
+  float sandW = clamp(1.0 - abs(tidS - 2.0), 0.0, 1.0);
+  float mtnW = clamp(1.0 - abs(tidS - 5.0), 0.0, 1.0);
+  float tundraW = clamp(1.0 - abs(tidS - 3.0), 0.0, 1.0);
+
   gWaterW = waterW;
   gForestW = forestW;
   gShoreW = shoreW;
@@ -267,30 +195,38 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
   gTundraW = tundraW;
   gMtnW = mtnW;
   gFidW = fidW;
-  gWetInv = wetInv;
 
-  // Relief normal from the continuous world-xz displacement field, weighted by
-  // the blended fields. Per-vertex gradients are constant across each cell fan,
-  // so interpolating them creased the shading along every hex edge.
+  // Relief normal from the continuous world-xz displacement field. Per-vertex
+  // gradients are constant across each cell fan, so interpolating them creased
+  // the shading along every hex edge; the fragment evaluates the same field's
+  // analytic gradient instead. (The wall-face branch is gone with the wall
+  // geometry — every fragment is a top face.)
   {
-    float topW = 1.0 - step(0.5, vFaceKind);
-    float landWf = smoothstep(0.02, 0.09, elevW) * topW;
+    float landWf = smoothstep(0.02, 0.09, elevW);
     float dHx = 0.0;
     float dHz = 0.0;
     vec3 md = fbm2d(p * 1.1);
-    float mMicro = 0.14 * mix(0.55, 1.0, mtnW) * uElevScale * 0.7;
+    float mMicro = 0.14 * mix(0.55, 0.85, mtnW) * uElevScale * 0.7;
     dHx += md.y * 1.1 * mMicro * landWf;
     dHz += md.z * 1.1 * mMicro * landWf;
-    vec3 rd = ridgeFbmd(p * 0.45);
-    float mRidge = 0.55 * mtnW * uElevScale;
-    dHx += rd.y * 0.45 * mRidge;
-    dHz += rd.z * 0.45 * mRidge;
+    // Same anisotropic ridge domain as the vertex displacement: rp = R*p, then
+    // q = rp * (0.32, 0.55), so dV/dp = J^T * (dV/dq) with J = diag(0.32,0.55)*R.
+    vec2 rp = mat2(0.866, 0.5, -0.5, 0.866) * p;
+    vec3 rd = ridgeFbmd(rp * vec2(0.32, 0.55));
+    float mRidge = 0.48 * mtnW * uElevScale;
+    dHx += (rd.y * 0.32 * 0.866 + rd.z * 0.55 * 0.5) * mRidge;
+    dHz += (-rd.y * 0.32 * 0.5 + rd.z * 0.55 * 0.866) * mRidge;
     vec3 nd = fbm2d(p * 0.55);
     float mDet = 0.12 * mtnW * uElevScale;
     dHx += nd.y * 0.55 * mDet;
     dHz += nd.z * 0.55 * mDet;
-    vec3 relief = normalize(vec3(-dHx * 0.85, 1.0, -dHz * 0.85));
-    gReliefNrm = normalize(mix(n, relief, 0.75 * topW));
+    vec3 relief = normalize(vec3(-dHx * 0.70, 1.0, -dHz * 0.70));
+    // 0.85 → 0.70: the vertex shader already displaces by this field, so a
+    // full-strength normal here double-counts the relief and is what made the
+    // massif read as packed worm lumps rather than lit rock. The value still
+    // matches the displaced silhouette; only the shading exaggeration is dialed
+    // back.
+    gReliefNrm = relief;
     slope = 1.0 - clamp(gReliefNrm.y, 0.0, 1.0);
   }
 
@@ -315,7 +251,7 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
   float coastN = (fbm2(p * 0.33 + 21.0) - 0.5) * 0.15 + (fbm2(p * 0.95) - 0.5) * 0.05;
   float waterMask = smoothstep(-0.07, 0.07, sdW + coastN);
   // One continuous switch, so no medium boundary is ever drawn as a line.
-  pal = mix(palLand, palWater, waterMask);
+  vec3 pal = mix(palLand, palWater, waterMask);
 
   vec3 albedo = pal;
   // Two scales of world-space mottle: without the sub-cell term a cell interior
@@ -333,6 +269,10 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
   float alt = vWorldPos.y;
   float altNorm = smoothstep(1.4, 3.1, alt);
   rock = mix(rock * vec3(1.04, 1.0, 0.94), rock * vec3(0.94, 0.96, 1.0), altNorm * 0.6);
+  // High rock has to sit clearly below the snow's luma or the whole upper
+  // massif reads as one pale sheet with no snow line. The crest albedo was
+  // measured at ~0.55-0.6 against snow at ~0.8 — not enough separation.
+  rock *= mix(1.0, 0.76, smoothstep(1.3, 2.5, alt));
   float scree = smoothstep(0.45, 0.15, crack);
   rock = mix(rock, rock * 0.72, scree * 0.4);
   // Snow band = 70-90% of the measured displaced peak (seed 20260916: 2.63).
@@ -341,7 +281,7 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
   snowLine *= smoothstep(0.55, 0.25, slope);
   snowLine *= 0.65 + 0.35 * fbm2(p * 2.4);
   float snowLit = clamp(dot(n, normalize(uSunDir)) * 0.5 + 0.5, 0.0, 1.0);
-  vec3 snow = mix(vec3(0.690, 0.769, 0.871), vec3(0.941, 0.973, 1.0), snowLit);
+  vec3 snow = mix(vec3(0.78, 0.84, 0.92), vec3(0.955, 0.975, 1.0), snowLit);
   snow *= 0.92 + 0.1 * fbm2(p * 3.0);
   rock = mix(rock, snow, clamp(snowLine, 0.0, 1.0));
   albedo = mix(albedo, rock, max(mtnW, snowLine) * (1.0 - waterMask));
@@ -351,24 +291,28 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
     albedo = mix(albedo, mix(grassTint, rock, 0.45), rampBand * (1.0 - n.y) * 0.9);
   }
 
-  // Depth from the signed shore distance: t1.r mixes shoreDist (water) with
-  // riverDist (land) across the waterline, so a bilinear read of it makes the
-  // near-shore water jump in depth and paint cell-shaped pale patches. The
-  // per-cell field is constant inside a shore ring, so the noise has to be at
-  // ring scale or the shelf reads as flat pale hexagons and ring bands.
-  float depth = clamp(sdW * 0.60 + (fbm2(p * 1.30) - 0.5) * 0.22 + (fbm2(p * 3.10 + 4.0) - 0.5) * 0.10, 0.0, 1.0);
+  // Depth from the signed shore distance, which the bake now stores as a real
+  // world-space distance to the waterline (saturating 2.5 units out). It used to
+  // be a per-cell mask that was constant over the whole sea, so the only gradient
+  // available was the interpolated sliver between a water and a land cell and the
+  // shelf came out as a wide lumpy band.
+  // The distance has to be used across its whole range: with a 0.60 gain and a
+  // navy ramp starting at 0.40 the deepest water only reached ~55% navy, so the
+  // open sea stayed a uniform milky teal with no readable depth.
+  float depth = clamp(sdW * 0.95 + (fbm2(p * 1.30) - 0.5) * 0.18 + (fbm2(p * 3.10 + 4.0) - 0.5) * 0.08, 0.0, 1.0);
   // Shallow water must not out-brighten the land, or the shore paint reads as a
   // white line drawn along the coast: keep the near-shore colour saturated and
   // the caustic lift small.
   // Three-stop water profile: a darker wet contact at the waterline, a pale
-  // turquoise shelf, then navy. A monotone pale-at-the-shore ramp made the
-  // waterline the brightest line in the frame (measured +0.029 luma rim).
-  vec3 water = mix(vec3(0.10, 0.26, 0.30), vec3(0.34, 0.62, 0.64), smoothstep(0.02, 0.15, depth));
-  water = mix(water, vec3(0.05, 0.16, 0.34), smoothstep(0.28, 0.62, depth));
-  float caust = fbm2(p * 2.6 + uTime * 0.14);
-  float caust2 = fbm2(p * 4.4 - uTime * 0.1 + 4.0);
+  // turquoise shelf, then navy.
+  vec3 water = mix(vec3(0.10, 0.26, 0.30), vec3(0.22, 0.50, 0.55), smoothstep(0.01, 0.22, depth));
+  water = mix(water, vec3(0.04, 0.13, 0.32), smoothstep(0.28, 0.68, depth));
+  float caust = fbm2(p * 3.0 + uTime * 0.14);
+  float caust2 = fbm2(p * 5.0 - uTime * 0.1 + 4.0);
   float shallowW = 1.0 - smoothstep(0.05, 0.45, depth);
-  water = mix(water, water * 1.10 + vec3(0.01, 0.02, 0.02), caust * caust2 * 0.22 * shallowW);
+  // The product of two low-frequency fbms is a cellular marble pattern; at lift
+  // 0.22 the shelf read as sculpted worm lumps instead of light on water.
+  water = mix(water, water * 1.08 + vec3(0.008, 0.014, 0.014), caust * caust2 * 0.12 * shallowW);
   water = microDetail(water, uNoiseTex, p, 1.0, 0.04, 0.5);
   // `step(0.5, vFaceKind)` alone means "wall faces only", so the whole water
   // stack (depth shelf, caustics, water colour) never reached the visible sea:
@@ -380,26 +324,6 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
   // the waterline is not the brightest line in the neighbourhood.
   float contact = (1.0 - smoothstep(0.0, 0.085, sdW + coastN)) * waterMask * topFaceW;
   albedo = mix(albedo, vec3(0.09, 0.22, 0.28), contact * 0.7);
-
-  // Cliff sides only on high-relief edges (relief > CLIFF_DROP in world Y)
-  if (vFaceKind > 0.5) {
-    float cliffSlope = clamp(slope * 0.5 + 0.7, 0.0, 1.0);
-    vec3 cliff = rockStrata(wp + vec3(0.0, elev * 1.6, 0.0), elev, cliffSlope);
-    float vertBand = sin(wp.y * 6.5 + fbm2(p * 1.8) * 2.0);
-    cliff *= 0.52 + 0.08 * vertBand;
-    float sunW = clamp(dot(n, normalize(uSunDir)) * 0.5 + 0.5, 0.0, 1.0);
-    vec3 aridCliff = mix(vec3(0.360, 0.245, 0.160), vec3(0.690, 0.530, 0.310), sunW);
-    cliff = mix(cliff, aridCliff, sandW * 0.75);
-    float topBlend = smoothstep(0.55, 0.95, n.y);
-    cliff = mix(cliff, pal * 0.75, topBlend * 0.3);
-    float wallAO = smoothstep(-0.4, 0.9, wp.y) * 0.25 + 0.72;
-    cliff *= wallAO;
-    // Shore faces read as a sand bank, not rock or a pale skirt.
-    float shoreW = smoothstep(0.10, 0.45, gWaterW);
-    vec3 shoreSand = mix(vec3(0.70, 0.60, 0.40), vec3(0.90, 0.83, 0.62), clamp(wp.y * 1.8, 0.0, 1.0));
-    albedo = mix(cliff, shoreSand, shoreW);
-    albedo *= 0.90 + 0.20 * fbm2(p * 1.6 + 3.0);
-  }
 
   // --- Forest / rainforest canopy (Rainforest treesMap color language) ---
   float coverAmt = smoothstep(0.18, 0.82, forestW + (fbm2(p * 0.90) - 0.5) * 1.10 + (fbm2(p * 2.3 + 17.0) - 0.5) * 0.45);
@@ -422,11 +346,12 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
     float tips = mix(fbm2(p * 4.2 + uTime * 0.12), fbm2(p * 1.1 + 7.0), farLod);
     canopyCol = mix(canopyCol, canopyWarm, tips * canopyH * 0.45);
 
-    // Per-crown tint variation — individual trees differ, one flat green does not
-    vec2 crownCell = floor(p * 1.2);
-    float crownA = hash21(crownCell);
-    float crownB = hash21(crownCell + 31.7);
-    canopyCol *= 0.84 + 0.32 * (crownA * (1.0 - farLod) + 0.5 * farLod);
+    // Per-crown tint variation. It has to come from a smooth field: hashing the
+    // lattice cell tinted every crown in that cell identically, which painted the
+    // forest as a regular grid of tinted dots on top of the dot lattice.
+    float crownA = fbm2(p * 0.62 + 19.0);
+    float crownB = fbm2(p * 0.47 + 41.3);
+    canopyCol *= 0.86 + 0.28 * (crownA * (1.0 - farLod) + 0.5 * farLod);
     canopyCol = mix(canopyCol, canopyCol * vec3(1.18, 1.06, 0.82), crownB * 0.45 * (1.0 - farLod * 0.6));
 
     if (uUseDetailTex > 0.5) {
@@ -450,11 +375,14 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
     float cLight = clamp(dot(cN, normalize(uSunDir)), 0.0, 1.0);
     albedo *= mix(0.55, 1.3, cLight);
 
-    // Near LOD: trunk suggestion (jittered so it doesn't read as a grid)
+    // Near LOD: trunk suggestion. Rotated and at a scale that shares no period
+    // with the crown lattice, so it cannot reinforce it into a grid.
     if (farLod < 0.88) {
-      vec2 cell = floor(p * 2.3);
+      mat2 trunkRot = mat2(0.825, 0.565, -0.565, 0.825);
+      vec2 tp = trunkRot * p * 1.85;
+      vec2 cell = floor(tp);
       float trunkHash = hash21(cell);
-      vec2 local = fract(p * 2.3) - 0.5;
+      vec2 local = fract(tp) - 0.5;
       local += (hash22(cell) - 0.5) * 0.5;
       float trunkDist = length(vec2(local.x * 1.6, local.y * 0.5));
       float trunkMask = smoothstep(0.07, 0.02, trunkDist) * (1.0 - canopy * 0.6);
@@ -508,12 +436,12 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
     dry *= (1.0 - waterMask) * (0.55 + 0.45 * fbm2(p * 1.1 + 5.0));
     albedo = mix(albedo, vec3(0.76, 0.70, 0.55), dry * 0.10);
 
-    // Surf: broken patches about half a step offshore, width driven by noise, so
-    // it reads as breaking water instead of a rim drawn along the coast.
+    // Surf: broken patches a fraction of a unit offshore, width driven by noise,
+    // so it reads as breaking water instead of a rim drawn along the coast.
     float surfN = fbm2(p * 1.7 + 9.0);
-    float surfBand = 1.0 - smoothstep(0.015, 0.030 + 0.045 * surfN, abs(sdW - (0.055 + 0.05 * surfN)));
+    float surfBand = 1.0 - smoothstep(0.020, 0.055 + 0.070 * surfN, abs(sdW - (0.080 + 0.050 * surfN)));
     surfBand *= smoothstep(0.45, 0.80, fbm2(p * 2.6 + uTime * 0.04));
-    albedo = mix(albedo, vec3(0.74, 0.86, 0.88), clamp(surfBand, 0.0, 1.0) * waterMask * 0.30);
+    albedo = mix(albedo, vec3(0.70, 0.82, 0.85), clamp(surfBand, 0.0, 1.0) * waterMask * 0.22);
 
     // No white overlay on the land side: that is what read as a line drawn
     // along the coast.
@@ -552,7 +480,7 @@ void main() {
       vec3 tn1 = texture2D(uWaterNormalTex, uv1).xyz * 2.0 - 1.0;
       vec3 tn2 = texture2D(uWaterNormalTex, uv2).xyz * 2.0 - 1.0;
       vec3 tn = normalize(tn1 + tn2);
-      float ripple = mix(0.05, 0.11, 1.0 - smoothstep(0.05, 0.5, gShoreW)) * wWaterN;
+      float ripple = mix(0.04, 0.08, 1.0 - smoothstep(0.05, 0.5, gShoreW)) * wWaterN;
       n = normalize(n + vec3(tn.x, 0.0, tn.y) * ripple);
     } else {
       float wx = fbm2(vWorldPos.xz * 2.8 + uTime * 0.4);
@@ -560,8 +488,13 @@ void main() {
       n = normalize(n + vec3((wx - 0.5) * 0.4, 0.0, (wz - 0.5) * 0.4) * wWaterN);
     }
     float wSandN = smoothstep(0.25, 0.45, gSandW) * (1.0 - step(0.5, vFaceKind));
+    // Dune ripples live in patches and at low contrast. At amp 0.05 the sine ran
+    // across the whole desert as uniform N-S pleats: the albedo field view is
+    // smooth there, so the stripes were pure normal shading, and their ~0.57 wu
+    // period matches this term exactly.
+    float duneMask = smoothstep(0.35, 0.65, fbm2(vWorldPos.xz * 0.5 + 3.0));
     float rip = sin(dot(vWorldPos.xz, normalize(vec2(1.2, 0.4))) * 11.0 + fbm2(vWorldPos.xz * 2.0) * 2.5);
-    n = normalize(n + vec3(rip * 0.05, 0.0, rip * 0.03) * wSandN);
+    n = normalize(n + vec3(rip * 0.018, 0.0, rip * 0.011) * wSandN * duneMask);
     float wForestN = smoothstep(0.22, 0.44, gForestW) * (1.0 - step(0.5, vFaceKind));
     float c = canopyField(vWorldPos.xz, uTime) * wForestN;
     n = normalize(n + vec3((c - 0.5) * 0.45, 0.2 + c * 0.2, (fbm2(vWorldPos.zx * 2.4) - 0.5) * 0.35) * wForestN);
@@ -595,14 +528,10 @@ void main() {
     hemi *= mix(vec3(1.0), vec3(0.82, 1.0, 0.78), isCanopy);
   }
 
-  // Base diffuse — stronger sun, weaker ambient (form definition)
+  // Base diffuse — stronger sun, weaker ambient (form definition). The old
+  // wall-only lifts (sun floor / ground-bounce ambient) are gone with the wall
+  // geometry: every fragment is a top face lit by the shared model below.
   vec3 lit = albedo * (hemi * 0.32 + sunCol * ndl * 1.55 + sunCol * wrap * 0.09);
-
-  // Vertical faces have little sky exposure; without this they read as black
-  // holes between hexes instead of rock walls.
-  float wallLift = 1.0 - clamp(n.y, 0.0, 1.0);
-  lit += albedo * mix(uGroundAmbient, uSkyColor, 0.08) * wallLift * 0.06;
-  lit += albedo * sunCol * wrap * wallLift * 0.18;
 
   lit += albedo * sunCol * back * mix(0.05, 0.16, isCanopy);
 
@@ -616,7 +545,7 @@ void main() {
   ao *= mix(0.66, 1.0, ndl * 0.5 + 0.5);
   float slopeShade = mix(0.62, 1.0, wrap);
   lit *= ao * slopeShade;
-  vec3 shTint = mix(vec3(0.12, 0.16, 0.10), vec3(0.12, 0.11, 0.14), clamp(gMtnW + wallLift, 0.0, 1.0));
+  vec3 shTint = mix(vec3(0.12, 0.16, 0.10), vec3(0.12, 0.11, 0.14), clamp(gMtnW, 0.0, 1.0));
   lit = max(lit, albedo * shTint);
 
   float cliffContact = (1.0 - clamp(n.y, 0.0, 1.0)) * gReliefW;
@@ -642,11 +571,7 @@ void main() {
     float specT = pow(max(dot(n, H), 0.0), 64.0);
     lit += vec3(0.75, 0.9, 1.05) * specT * 0.4 * (0.3 + fre) * wTundra;
 
-    float wWall = step(0.5, vFaceKind);
-    float specW = pow(max(dot(n, H), 0.0), 40.0);
-    lit += vec3(0.35, 0.33, 0.30) * specW * 0.08 * wWall;
-
-    float wPlain = (1.0 - wWater) * (1.0 - wTundra) * (1.0 - wWall);
+    float wPlain = (1.0 - wWater) * (1.0 - wTundra);
     float specP = pow(max(dot(n, H), 0.0), 16.0);
     lit += sunCol * specP * 0.03 * wPlain;
   }
@@ -656,16 +581,23 @@ void main() {
     lit += vec3(0.4, 0.56, 0.24) * pow(fre, 4.0) * canopyOcc * 0.16 * wForest;
   }
 
-  // Atmospheric fog — lighter, height-aware
+  // Atmospheric fog — lighter, height-aware. Two rounds of tuning went into
+  // this: 0.018 flattened the far half of a 30-unit view into haze, and 0.013
+  // still left the default overview at 85% fog on the far rim, which read as a
+  // pastel wash over the whole map (measured on the terrain pixels only: luma
+  // mean 133 and spread 29.6, against 77 and 54.6 with fog disabled). Aerial
+  // perspective is wanted at landmark scale, a veil is not.
   if (uEnableFog > 0.5) {
-    float density = 0.018;
+    float density = 0.006;
     vec3 fogCol = mix(uHorizonColor * 0.9, uSkyColor, 0.5);
     fogCol = mix(fogCol, vec3(0.88, 0.78, 0.60), 0.3 * gSandW);
     fogCol = mix(fogCol, vec3(0.45, 0.62, 0.78), 0.3 * gWaterW);
-    float heightAtten = mix(1.15, 0.40, clamp(vWorldPos.y / 3.0, 0.0, 1.0));
+    float heightAtten = mix(1.15, 0.45, clamp(vWorldPos.y / 3.0, 0.0, 1.0));
     lit = fogExtinct(lit, fogCol, camDist * heightAtten, density);
-    float farFade = smoothstep(36.0, 120.0, camDist);
-    lit = mix(lit, fogCol, farFade * 0.3);
+    // Only the far rim fades now; at 36 units this was already taking 14% off the
+    // middle of the map, on top of the extinction above.
+    float farFade = smoothstep(70.0, 220.0, camDist);
+    lit = mix(lit, fogCol, farFade * 0.25);
   }
 
   if (uShowWireHint > 0.5) {
@@ -685,6 +617,32 @@ void main() {
   lit = clamp(lit, 0.0, 1.0);
   float finalLuma = dot(lit, vec3(0.299, 0.587, 0.114));
   lit = mix(lit * vec3(0.96, 0.98, 1.04), lit * vec3(1.03, 1.0, 0.96), smoothstep(0.3, 0.75, finalLuma));
+
+  // Diagnostic field view (uDbgField != 0): paint the chosen field greyscale and
+  // skip the lighting stack. Defaults to 0, so the shipping path is unchanged.
+  if (uDbgField > 0.5) {
+    float v = 0.0;
+    if (uDbgField < 1.5) v = gForestW;
+    else if (uDbgField < 2.5) v = gShoreW;
+    else if (uDbgField < 3.5) v = gReliefW;
+    else if (uDbgField < 4.5) v = gElevW;
+    else if (uDbgField < 5.5) v = gFidW;
+    else if (uDbgField < 6.5) v = fbm2(vWorldPos.xz * 0.90);
+    else if (uDbgField < 7.5) v = gWaterW;
+    else if (uDbgField < 8.5) v = gMtnW;
+    else if (uDbgField < 9.5) v = dot(albedo, vec3(0.299, 0.587, 0.114));
+    else if (uDbgField < 10.5) v = fbm2(vWorldPos.xz * 2.3 + 17.0);
+    else if (uDbgField < 11.5) v = canopyField(vWorldPos.xz, uTime);
+    else if (uDbgField < 12.5) v = canopyHeightFactor(vWorldPos.xz, uTime);
+    // 13: the albedo in colour, not luma — the field views above cannot show a
+    // hue, and a wall that reads green is a question about its albedo's hue.
+    else if (uDbgField < 13.5) {
+      gl_FragColor = vec4(albedo, 1.0);
+      return;
+    } else v = vFaceKind;
+    gl_FragColor = vec4(vec3(v), 1.0);
+    return;
+  }
 
   gl_FragColor = vec4(lit, 1.0);
 }
