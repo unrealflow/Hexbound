@@ -2,7 +2,8 @@
 
 > 基准提交：`dfba319`（2026-09-19）  
 > 「全焊接连续地形（移除断崖机制）+ 子格预滤波与距离场观感升级 + 地形生成论文」  
-> 配套：`docs/paper/procedural-hex-terrain-paper.md`、`docs/design/impl-progress.md`、`docs/design/hexbound-terrain-maturity-spec.md`
+> 配套：`docs/paper/procedural-hex-terrain-paper.md`、`docs/design/impl-progress.md`、`docs/design/hexbound-terrain-maturity-spec.md`  
+> 复核：2026-09-19 第二轮，对照 `547a8ed` 的代码、`package.json` 与外链逐条核实（见文末复核记录）
 
 ---
 
@@ -24,7 +25,7 @@ Hexbound 图形验证期的**几何/无缝/连续性硬问题已基本钉死**�
 | 数据表示 | 两张 RGBA8；**4×4 子格** + `(1−d/r)³` 紧支撑预滤波；岸线 **线段 SDF**；河距场 | 论文 §3–4；`HexTerrainMaterial` |
 | 几何 | **无条件角点焊接**、**无侧壁**；任意竖直剖面连续（`profile:check` 单步高差实测 max ≈ 0.0086 wu） | `terrainContinuity.ts`、`ChunkMesher.ts` |
 | 着色 | 解析 FBM 法线、各向异性山脊位移、林冠 soft-ellipsoid、岸带/三停水色/焦散、坡度岩雪、雾 | `hexTerrain.{vert,frag}.glsl`、`noise.glsl` |
-| 门禁 | `glsl` / `tsc` / `crack` / `corner` / `hole` / `disp:weld` / `profile` / `pick`；`npm run verify` | `package.json` scripts |
+| 门禁 | `p0:check` = glsl → tsc → crack → **profile** → corner → hole → disp:weld；`verify` = `p0:check` + `pick`（共 8 项，已对照 `package.json`） | `package.json` scripts |
 | 文档 | 网页设计 v0.5、成熟度规格、迭代日志、数据原理论文、VISUAL_TARGETS、ShaderToy 技法表 | `docs/**` |
 | 资源策略 | 参考图 / 截图**不入库**；`refs:fetch` / `shots` 再生；运行时只保留合成 tex | `8034db5` |
 
@@ -41,7 +42,7 @@ Hexbound 图形验证期的**几何/无缝/连续性硬问题已基本钉死**�
 | 森林/部分岸带仍受「每格 1 样本」带宽限制 | `forestCover` 等源场分辨率不够；预滤波不能发明信息 | **P0 下一阶段** |
 | 河谷在宽景可读性不足 | `riverDist` 已有，河面几何 / 水面着色未升为真河 | **P0** |
 | elev 与 GPU 位移是双场 | 雪线依赖 `calib-y` 探针；玩法/AI 高度语义分裂 | **P1** |
-| README 仍写「悬崖保留」 | 文档滞后于 `dfba319` | 文档修补 |
+| 崖墙前提仍残留在两份文档 | `hexbound-terrain-maturity-spec.md`（P1-3「崖/台地」、A4、瀑布章节仍引用 `CLIFF_DROP` 侧壁）与 `VISUAL_TARGETS.md`（Hills→Mountains 行仍要求 "strong elevation steps / cliff readability"） | 文档修补（§2.3 步骤 A，须与连续性规格对齐后重写） |
 | 玩法层几乎为零 | 拾取/调试面板有，移动·迷雾·战斗无 | 图形验收后另开里程碑 |
 
 ---
@@ -169,7 +170,7 @@ S1–S2 是纯数据层，可与 B（子格源数据）**并行或先行**——
 | Scarlet — One Shader One Mesh One Island | https://scarlet.engineering/blog/ground-shader/ | GPU 烘焙岸线 SDF；FBM 扰动岸线；foam/shallow/deep 分层 |
 | Cinevva — Island from noise（浏览器开放世界） | https://app.cinevva.com/blog/2026-05-13-open-world-browser-part-27-island-and-terrain | domain-warp FBM + redistribution + 径向岛屿；「地要像地」的工程拆解 |
 | Losasso & Hoppe — Geometry Clipmaps (SIGGRAPH 2004) | https://hhoppe.com/proj/geomclipmap/ | 嵌套规则网格 LOD / 实时合成；**仅当地图规模暴涨时**再评估 |
-| Shiben Bhattacharjee — Hexagonal Geometry Clipmaps（论文/学位论文相关） | https://cvit.iiit.ac.in/images/Thesis/MS/shibenMS2010/shibenMSthesis.pdf | 六边 clipmap 思路；超出当前 40×32 验证范围 |
+| Shiben Bhattacharjee — Hexagonal Geometry Clipmaps（论文/学位论文相关） | https://cvit.iiit.ac.in/images/Thesis/MS/shibenMS2010/shibenMSthesis.pdf | 六边 clipmap 思路；超出当前 40×32 验证范围（PDF 直链未复核，fetch 超时） |
 
 ### 3.5 项目内已沉淀（视为一级参考，优先于外部博客）
 
@@ -184,15 +185,15 @@ S1–S2 是纯数据层，可与 B（子格源数据）**并行或先行**——
 | 参考 | 链接 | 映射到 |
 |------|------|--------|
 | Barnes, Lehman, Mulla (2014) — *Priority-Flood: An optimal depression-filling and watershed-labeling algorithm*（Computers & Geosciences；预印 arXiv:1511.04463；参考实现 Barnes2013-Depressions / RichDEM） | https://arxiv.org/abs/1511.04463 · https://github.com/r-barnes/Barnes2013-Depressions · https://richdem.readthedocs.io | **S1 填洼/湖泊算法蓝本**；优先队列泛洪可直接翻译到 D6 邻接 |
-| Braun & Willett (2013) — *A very efficient O(n), implicit and parallel method to solve the stream power equation*（FastScape, Geosci. Model Dev.；Landlab 组件） | https://landlab.readthedocs.io/en/latest/generated/api/landlab.components.stream_power.fastscape_stream_power.html | **S2 接收器树 + S3 下切**的 O(n) 框架；本项目取其静态近似，不跑时间迭代 |
-| GRASS GIS `r.stream.order`；Deltares PyFlwDir（Strahler stream order） | https://grass.osgeo.org · https://deltares.github.io/pyflwdir/ | **S3 Strahler 分级**的两种遍历实现参考 |
-| PNNL (2022) — *Advances in hexagon mesh-based flow direction modeling* | https://www.pnnl.gov | 六边形网格上流向/分水岭的学术支撑：等角邻接使坡向偏差更均匀 |
-| Red Blob Games — *Procedural river drainage basins*（2017；区别于 §3.2 的 mapgen2 仓库） | https://www.redblobgames.com | 从海岸反推河系 + 高度图配合排水的游戏向实践（同族 axial 坐标） |
-| Catlike Coding — *Hex Map 26: Biomes and Rivers*（2018；区别于 §3.3 的 2-2-0 网格线篇） | https://catlikecoding.com | 六边形河流数据结构对照：river-edge 表示 vs 本项目的格中心水体 |
-| Cordonnier et al. (2016) — *Large Scale Terrain Generation from Tectonic Uplift and Fluvial Erosion*（CGF 35(2), Eurographics 2017；HAL 开放获取；社区实现 Sean-Hastings/Terrain-Generation） | https://inria.hal.science | **备选主线**：抬升+侵蚀让山脊/河谷/树状水系一体涌现（与 S1–S3 共享全部水文基建；地图扩容或「险峻感」不足时启动） |
-| Mei, Decaudin, Hu (2007) — *Fast Hydraulic Erosion Simulation and Visualization on GPU*（pipe model, Pacific Graphics 07） | https://inria.hal.science | 后续局部细节（冲沟/碎石扇）；非本轮主干 |
+| Braun & Willett (2013) — *A very efficient O(n), implicit and parallel method to solve the stream power equation*（FastScape, Geosci. Model Dev.；Landlab `FastscapeEroder` 组件） | https://landlab.readthedocs.io/en/latest/generated/api/landlab.components.stream_power.fastscape_stream_power.html | **S2 接收器树 + S3 下切**的 O(n) 框架；本项目取其静态近似，不跑时间迭代 |
+| GRASS GIS `r.stream.order`（addons 手册）；Deltares **PyFlwDir**（Strahler stream order；docs `…/latest/`） | https://grass.osgeo.org/grass-stable/manuals/addons/r.stream.order.html · https://deltares.github.io/pyflwdir/latest/ | **S3 Strahler 分级**的两种遍历实现参考 |
+| Liao et al. (PNNL, 2022) — *Advances in hexagon mesh-based flow direction modeling*（ScienceDirect；开源 **HexWatershed**） | https://github.com/pnnl/hexwatershed | 六边形网格上流向/分水岭的学术支撑：等角邻接使坡向偏差更均匀（按题名在 ScienceDirect/Wiley 可检到期刊版） |
+| Red Blob Games — *Procedural river drainage basins*（2017，`/x/` 系列；区别于 §3.2 的 mapgen2 仓库） | https://www.redblobgames.com/x/1723-procedural-river-drainage-basins/ | 从海岸反推河系 + 高度图配合排水的游戏向实践（同族 axial 坐标） |
+| Catlike Coding — *Hex Map 26: Biomes and Rivers*（2018；区别于 §3.3 的 2-2-0 网格线篇） | https://catlikecoding.com/unity/tutorials/hex-map-26/ | 六边形河流数据结构对照：river-edge 表示 vs 本项目的格中心水体 |
+| Cordonnier et al. (2016) — *Large Scale Terrain Generation from Tectonic Uplift and Fluvial Erosion*（CGF 35(2), Eurographics 2017；HAL 开放获取；社区实现 Sean-Hastings/Terrain-Generation） | https://inria.hal.science/hal-01262376 | **备选主线**：抬升+侵蚀让山脊/河谷/树状水系一体涌现（与 S1–S3 共享全部水文基建；地图扩容或「险峻感」不足时启动） |
+| Mei, Decaudin, Hu (2007) — *Fast Hydraulic Erosion Simulation and Visualization on GPU*（pipe model, Pacific Graphics 07） | https://inria.hal.science/inria-00402079 | 后续局部细节（冲沟/碎石扇）；非本轮主干 |
 | Janert (2024) — *Terrain Generation: River Networks* | https://janert.me | 河网成形过程的现代教程，校准 A_threshold / 宽度指数的参数直觉 |
-| Godot **Waterways**（river ribbon mesh + 自动烘焙 flow/foam map）；Unreal *Baked River Simulations*；Valve *Water flow maps* | https://dev.epicgames.com · https://developer.valvesoftware.com | **S4 渲染**两条现成管线参照：我们以「格顶点水带 + RG flow 通道」等价实现 flow-map 平移 |
+| Godot **Waterways**（Arnklit；river ribbon mesh + 自动烘焙 flow/foam map）；Unreal *Baked River Simulations*；Valve *Water flow maps* | https://github.com/Arnklit/Waterways · https://dev.epicgames.com · https://developer.valvesoftware.com | **S4 渲染**两条现成管线参照：我们以「格顶点水带 + RG flow 通道」等价实现 flow-map 平移 |
 
 扩展阅读（未逐条核实版本）：Musgrave/Kolb/Mace 1989 eroded fractal terrains
 （SIGGRAPH，水力/热力侵蚀奠基）；Cook & DeRose 2005 Wavelet Noise（B 步子格
@@ -244,3 +245,35 @@ S1–S2 是纯数据层，可与 B（子格源数据）**并行或先行**——
 
 *文档生成：2026-09-19。分析对象为 GitHub `unrealflow/Hexbound@dfba319` 拉新后工作区。*  
 *2026-09-19 晚合并：G-Hydro 水文路线提案（原 `docs/design/next-step-hydrology.md`，按约定不入库）并入 §2.4 / §3.6 / §5。*
+
+## 7. 复核记录（2026-09-19 第二轮，基准 `547a8ed`）
+
+**对照代码核实过的断言**（全部通过）：
+
+- 门禁组成与顺序：`p0:check` = glsl → tsc → crack → profile → corner → hole →
+  disp:weld；`verify` = `p0:check` + `pick`（`package.json`）。
+- `profile:check` 实测数字：4 条贯穿剖面 × 0.01wu，最大单步高差 0.0086、最大
+  坡度 0.86（`scripts/profile-probe.ts` 输出）。
+- 拾取精度：pick 面上误差 max 1.37e-7、同格 158/181（`pick:check` 输出）。
+- 数据表示：两张 RGBA8、`MAP_SUB=4`、`(1−d/r)³` 核（AREA 2.2 / BAND 1.8 格）、
+  有符号线段 SDF（`SHORE_RANGE=2.5`）、`uMapTex1.R` 陆地为 `riverDist`——
+  与 `HexMap.ts` / `HexTerrainMaterial.ts` 一致。
+- 角点焊接/无墙/`WATER_Y=0.02`/临水角点贴海面——与 `terrainContinuity.ts`、
+  `ChunkMesher.ts` 一致（`CLIFF_DROP` 等仅旧门禁读取）。
+
+**据此修订的地方**：
+
+1. §1.3「README 仍写悬崖保留」→ 精确为 `hexbound-terrain-maturity-spec.md`
+   （P1-3/A4/瀑布章节）与 `VISUAL_TARGETS.md`（grep 实证两处仍在）。
+2. §1.1 门禁行改为 `package.json` 的实际管线组合。
+3. §3.6 泛域名链接全部钉死为已验证的精确 URL：Red Blob drainage basins
+   （`/x/1723-…`）、Catlike（`/unity/tutorials/hex-map-26/`）、PyFlwDir
+   （`…/latest/`，根路径 404）、PNNL（改引 HexWatershed 仓库）、Mei
+   （`inria-00402079`）、Cordonnier（`hal-01262376`）、Waterways
+   （`Arnklit/Waterways`）；GRASS 修正为 addons 手册路径（核心手册路径 404）。
+4. §3.4 shiben 学位论文 PDF 标注「未复核」（fetch 超时）。
+
+**外链核验状态**：§3.1–§3.4 与 §3.6 共 16 个条目，15 个 fetch 验证有效
+（含 catlikecoding 2-2-0、redblobgames x/2543、scarlet、cinevva、dashwood、
+hhoppe、godotshaders、felixturner、arxiv、landlab、pyflwdir/latest、
+grass addons、inria×2、Arnklit/Waterways 检索确认），1 个标注未核验。
