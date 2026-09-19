@@ -80,6 +80,54 @@ D. 位移烘焙回高度真源（或收缩位移为纯细节）
 E. （可选）探索层最小交互
 ```
 
+### 2.4 重点目标细化：G-Hydro——六边形图上的水文一致地形（G3 的完整技术路线）
+
+> 原 `docs/design/next-step-hydrology.md` 提案并入本节（该文件按约定不入库）。
+> §2.1 的 G3「真河道切片」在这里展开为四步可实施路线与可判定验收口径。
+
+**目标陈述**：把「假河」（湿度种子 + 贪心下行游走 + `elev×0.72` 雕刻）替换为在
+六边形图上自洽的水文系统——**填洼成湖 → D6 流向 → 汇流面积 → Strahler 分级
+河网（宽度 ∝ 汇流面积）→ 连续下切成谷 → 河道真水体渲染**。全程不破坏现有门禁，
+并为「险峻感」提供合法通道：河谷两岸天然是连续陡坡（剖面连续规格下，山体的
+陡由连续场表达，河谷把陡"用"在正确的地方）。
+
+子目标（H 编号，避免与 §2.1 的 G 混淆）：
+
+| # | 子目标 | 验收方式 |
+|----|--------|----------|
+| H1 | 水文一致性：每个陆地格的流线最终汇入海洋或湖泊，无悬挂流，河网为树（无环） | 新门禁 `hydro:check`（入 `p0:check`） |
+| H2 | 河网形态：至少 1 条 Strahler ≥ 3 的干流从山地贯通入海；河道宽度随汇流面积单调不减 | `hydro:check` 报告 maxStrahler 与宽度-面积相关系数 |
+| H3 | 谷形连续：河道下切后 `profile:check` 仍绿；跨河剖面为平滑 V/U 谷（谷深 > 0.3wu） | `profile:check` + 跨河剖面子探针 |
+| H4 | 视觉可读：官方 01/04 机位上河道水带 ≥ 0.5 格宽、连续无断裂，谷地绿带与河道对齐 | `npm run shots` + `orient-metric`，对照 P1-5 失败基线 |
+| H5 | 湖泊：内陆洼地出现 ≥ 1 个湖，湖面 = 溢流高程（Priority-Flood 直接产物），岸线为连续等高线 | `hydro:check`（lakeCells、湖面高程一致性） |
+
+**技术路线（四步，全部在六边形图上，O(n log n) 内；复用 AXIAL_DIRS、cellTopY、
+uMapTex1.R 通道位、岸距 SDF 水着色整套）**：
+
+- **S1 填洼与湖泊**：以海洋格为种子、按高程出队的 Priority-Flood 优先队列泛洪
+  （D6 邻接）。泛洪水位与原地形之差 > 0 的连通区域 = 湖，湖面 = 溢流高程。
+  输出 `filledElev / lakeId / lakeLevel` → H1/H5 的数据基础。
+- **S2 流向与汇流**：填洼场上的 D6 最陡下降（并列坡度用低频噪声打破对称），
+  得到接收器树；按高程降序拓扑累加汇流面积 `A`。等价 FastScape 的 O(n) 流路由。
+- **S3 河网成形与谷雕刻**：`A ≥ A_threshold` 选河（阈值控河网密度，约 2–4% 陆地
+  格）→ Strahler 分级（干流 = 最高序路径）→ 宽度 `w = w₀·(A/A₀)^0.45`（Hack
+  定律量级，源头 ~0.2 格到河口 ~1.5 格）；下切取 stream power 的静态近似
+  `Δelev = K·A^m·S^n`，**下切量强制过与 `cellTopY` 同型的平滑核**再写回 elev 场
+  ——这是 H3 的保障。山体主脊仍由各向异性脊线噪声承担，水文只负责「谷」与
+  「水」，不做全图侵蚀模拟（那是 Cordonnier 路线，见 §3.6）。
+- **S4 河道真水体渲染**：`uMapTex1.R` 从 `riverDist` 距离带升级为**归一化河道
+  横向距离** `t ∈ [−1,1]`（负=水下）+ 河宽 + 分级序号，烘焙沿用 4×4 子格 +
+  紧支撑核管线（岸线 SDF 的同款，论文 §4.2/§4.3 直接复用）；水面高程 = 溢流
+  高程沿河插值（已连续）；flow 方向 = 接收器树父指针烘焙进 RG 通道（flow-map
+  平移法线/贴图）；`heightAt` 增加 `max(地形, 河面)` 分支，拾取与 `dispW` 同型。
+
+**里程碑**：M1 数据层（S1+S2 + `hydro:check`，H1/H5 就绪）→ M2 形态层（S3 +
+官方出图，H2/H3）→ M3 渲染层（S4 + pick/profile 回归，H4）。
+
+**与 §2.3 实现顺序的关系**：G-Hydro 是步骤 **C（真河道）** 的完整展开。其中
+S1–S2 是纯数据层，可与 B（子格源数据）**并行或先行**——若河网先落地，B 的
+分形上采样高频上限可直接对齐河道距离场，两步互不阻塞。
+
 ---
 
 ## 3. 外部文献与工程参考（检索整理）
@@ -131,6 +179,25 @@ E. （可选）探索层最小交互
 4. `docs/VISUAL_TARGETS.md` + `refs/SOURCES.md` — 观感对标与参考图来源  
 5. `docs/shadertoy-refs/TECHNIQUES.md` — 允许移植 / 禁止整段 raymarch 的边界  
 
+### 3.6 水文、河网与河道水体（G-Hydro / §2.4 的支撑文献，已检索核实）
+
+| 参考 | 链接 | 映射到 |
+|------|------|--------|
+| Barnes, Lehman, Mulla (2014) — *Priority-Flood: An optimal depression-filling and watershed-labeling algorithm*（Computers & Geosciences；预印 arXiv:1511.04463；参考实现 Barnes2013-Depressions / RichDEM） | https://arxiv.org/abs/1511.04463 · https://github.com/r-barnes/Barnes2013-Depressions · https://richdem.readthedocs.io | **S1 填洼/湖泊算法蓝本**；优先队列泛洪可直接翻译到 D6 邻接 |
+| Braun & Willett (2013) — *A very efficient O(n), implicit and parallel method to solve the stream power equation*（FastScape, Geosci. Model Dev.；Landlab 组件） | https://landlab.readthedocs.io/en/latest/generated/api/landlab.components.stream_power.fastscape_stream_power.html | **S2 接收器树 + S3 下切**的 O(n) 框架；本项目取其静态近似，不跑时间迭代 |
+| GRASS GIS `r.stream.order`；Deltares PyFlwDir（Strahler stream order） | https://grass.osgeo.org · https://deltares.github.io/pyflwdir/ | **S3 Strahler 分级**的两种遍历实现参考 |
+| PNNL (2022) — *Advances in hexagon mesh-based flow direction modeling* | https://www.pnnl.gov | 六边形网格上流向/分水岭的学术支撑：等角邻接使坡向偏差更均匀 |
+| Red Blob Games — *Procedural river drainage basins*（2017；区别于 §3.2 的 mapgen2 仓库） | https://www.redblobgames.com | 从海岸反推河系 + 高度图配合排水的游戏向实践（同族 axial 坐标） |
+| Catlike Coding — *Hex Map 26: Biomes and Rivers*（2018；区别于 §3.3 的 2-2-0 网格线篇） | https://catlikecoding.com | 六边形河流数据结构对照：river-edge 表示 vs 本项目的格中心水体 |
+| Cordonnier et al. (2016) — *Large Scale Terrain Generation from Tectonic Uplift and Fluvial Erosion*（CGF 35(2), Eurographics 2017；HAL 开放获取；社区实现 Sean-Hastings/Terrain-Generation） | https://inria.hal.science | **备选主线**：抬升+侵蚀让山脊/河谷/树状水系一体涌现（与 S1–S3 共享全部水文基建；地图扩容或「险峻感」不足时启动） |
+| Mei, Decaudin, Hu (2007) — *Fast Hydraulic Erosion Simulation and Visualization on GPU*（pipe model, Pacific Graphics 07） | https://inria.hal.science | 后续局部细节（冲沟/碎石扇）；非本轮主干 |
+| Janert (2024) — *Terrain Generation: River Networks* | https://janert.me | 河网成形过程的现代教程，校准 A_threshold / 宽度指数的参数直觉 |
+| Godot **Waterways**（river ribbon mesh + 自动烘焙 flow/foam map）；Unreal *Baked River Simulations*；Valve *Water flow maps* | https://dev.epicgames.com · https://developer.valvesoftware.com | **S4 渲染**两条现成管线参照：我们以「格顶点水带 + RG flow 通道」等价实现 flow-map 平移 |
+
+扩展阅读（未逐条核实版本）：Musgrave/Kolb/Mace 1989 eroded fractal terrains
+（SIGGRAPH，水力/热力侵蚀奠基）；Cook & DeRose 2005 Wavelet Noise（B 步子格
+上采样的抗混叠噪声替换候选）。CDLOD / clipmaps 已列 §3.4。
+
 ---
 
 ## 4. 与论文「后续方向」的对齐
@@ -153,6 +220,10 @@ E. （可选）探索层最小交互
 |------|------|
 | 上采样引入新的轴对齐伪影 | 沿用林冠修复经验：domain warp + 方向直方图门禁（`orient-metric`） |
 | 河面破坏焊接/拾取 | 河面作为顶面高度场修改或独立共面 mesh；必须过 `profile` + `pick` |
+| 河道下切破坏剖面连续（H3） | 下切量强制过与 `cellTopY` 同型的平滑核；`profile:check` 每轮必跑，失败即降侵蚀强度 K |
+| D6 最陡下降的对称性伪影 | 并列坡度用低频噪声打破；六边形等角邻接本身减少方向偏差（PNNL 2022，§3.6） |
+| 河道距离场与岸线 SDF 相互污染 | 河道横向距离独立通道烘焙；水 palette 已按介质分离（论文 §6.4 同款机制） |
+| 40×32 河网层级不足 | H2 门槛设 Strahler ≥ 3（2–3 级汇流当前图规模可达成）；必要时 `A_threshold` 与湿度种子阈值联动 |
 | 位移烘焙改变轮廓导致雪线崩 | 先冻结 `calib-y` 基线截图，再改真源；雪线改读烘焙高 |
 | 过度追求「像参考图」而引入照片 atlas | 硬禁；只允许 `public/tex` 合成平铺 |
 | README / 规格过时误导后续 agent | 本轮先做文档同步再动大改 |
@@ -171,4 +242,5 @@ E. （可选）探索层最小交互
 
 ---
 
-*文档生成：2026-09-19。分析对象为 GitHub `unrealflow/Hexbound@dfba319` 拉新后工作区。*
+*文档生成：2026-09-19。分析对象为 GitHub `unrealflow/Hexbound@dfba319` 拉新后工作区。*  
+*2026-09-19 晚合并：G-Hydro 水文路线提案（原 `docs/design/next-step-hydrology.md`，按约定不入库）并入 §2.4 / §3.6 / §5。*

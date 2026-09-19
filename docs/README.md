@@ -3,7 +3,7 @@
 | 文档 | 说明 |
 |------|------|
 | [paper/procedural-hex-terrain-paper.md](paper/procedural-hex-terrain-paper.md) | **论文：程序化六边形地形生成的数据原理**（噪声合成 / 预滤波 / SDF / 焊接 / 门禁方法学） |
-| [design/2026-09-19-hexbound-goals-and-refs.md](design/2026-09-19-hexbound-goals-and-refs.md) | **现状分析、目标与外部参考**（拉新 `dfba319` 后；下一阶段验收指标 + 文献表） |
+| [design/2026-09-19-hexbound-goals-and-refs.md](design/2026-09-19-hexbound-goals-and-refs.md) | **现状分析、目标与外部参考**（拉新 `dfba319` 后；下一阶段验收指标 + 文献表；含 G-Hydro 水文路线细化 §2.4） |
 | [design/hexbound-game-design-web.md](design/hexbound-game-design-web.md) | **完整游戏设计（网页版 v0.5）** — 探索/战斗/POI/里程碑 |
 | [design/hexbound-terrain-maturity-spec.md](design/hexbound-terrain-maturity-spec.md) | 地形成熟度规格（指标 A 无缝 + B 地标） |
 | [design/impl-progress.md](design/impl-progress.md) | 实现进度与门禁实测日志 |
