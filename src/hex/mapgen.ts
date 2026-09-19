@@ -106,10 +106,10 @@ export function generateMap(opts: MapGenOptions): HexMap {
     // Continent: mid frequency + strong ocean shelf falloff
     const continent = fbm(wx * 2.0, wy * 2.0, seed, 5);
     const elevNoise = fbm(wx * 4.0 + 10, wy * 4.0, seed + 7, 4);
-    // Mountain spine — localized, not map-wide
-    const spine = ridge(wx * 2.8 + 0.5, wy * 2.8, seed + 77, 5);
-    const spine2 = ridge(wx * 4.2 - 1.2, wy * 1.6 + 0.8, seed + 91, 4);
-    const spineMix = Math.max(spine * 0.9, spine2 * 0.45);
+    // Mountain spine — anisotropic secondary ridge keeps ranges narrow (Civ feel)
+    const spine = ridge(wx * 3.2 + 0.5, wy * 2.4, seed + 77, 5);
+    const spine2 = ridge(wx * 5.4 - 1.2, wy * 1.35 + 0.8, seed + 91, 4);
+    const spineMix = Math.max(spine * 0.95, spine2 * 0.55);
 
     const edgeDist = Math.min(nx, 1 - nx, ny, 1 - ny);
     // Soft land only in interior; outer ~25% trends ocean
@@ -117,7 +117,7 @@ export function generateMap(opts: MapGenOptions): HexMap {
 
     // Bias toward ocean: need continent+edge to overcome -0.55 threshold
     let landMass =
-      continent * 0.52 + elevNoise * 0.14 + spineMix * 0.1 + edge * 0.5 - 0.42;
+      continent * 0.52 + elevNoise * 0.12 + spineMix * 0.14 + edge * 0.5 - 0.42;
     const gulf = fbm(wx * 5.0 + 90, wy * 5.0, seed + 40, 3);
     if (gulf < 0.32 && edgeDist < 0.38) landMass -= 0.14;
     // Inland lakes (sparse)
@@ -127,9 +127,12 @@ export function generateMap(opts: MapGenOptions): HexMap {
 
     let elev = 0;
     if (landMass >= 0.0) {
-      // Most land stays low; mountains only on strong spines
-      let e = 0.15 + elevNoise * 0.3 + Math.max(0, landMass) * 0.4;
-      if (spineMix > 0.48) e += (spineMix - 0.48) * 1.05;
+      // Most land stays low; peaks concentrate on spines (narrower, taller).
+      let e = 0.12 + elevNoise * 0.26 + Math.max(0, landMass) * 0.36;
+      if (spineMix > 0.36) {
+        const s = spineMix - 0.36;
+        e += s * s * 2.4 + s * 0.85;
+      }
       elev = Math.min(1, Math.max(0.08, e));
     }
     elevField[lr * width + lq] = elev;
@@ -187,9 +190,9 @@ export function generateMap(opts: MapGenOptions): HexMap {
     // Low-frequency moisture / temp → large biome regions
     const moistNoise = fbm(wx * 1.8 + 20, wy * 1.8, seed + 13, 4);
     const tempNoise = fbm(wx * 1.4 + 40, wy * 1.4, seed + 19, 3);
-    const spine = ridge(wx * 2.2 + 0.5, wy * 2.2, seed + 77, 5);
-    const spine2 = ridge(wx * 3.8 - 1.2, wy * 1.4 + 0.8, seed + 91, 4);
-    const spineMix = Math.max(spine * 0.9, spine2 * 0.45);
+    const spine = ridge(wx * 3.2 + 0.5, wy * 2.4, seed + 77, 5);
+    const spine2 = ridge(wx * 5.4 - 1.2, wy * 1.35 + 0.8, seed + 91, 4);
+    const spineMix = Math.max(spine * 0.95, spine2 * 0.55);
     const forestBelt = fbm(wx * 1.6 + 60, wy * 1.6, seed + 88, 4);
     const aridBelt = fbm(wx * 1.5 + 120, wy * 1.5, seed + 50, 3);
 
@@ -201,9 +204,9 @@ export function generateMap(opts: MapGenOptions): HexMap {
     const coastal = landMass >= 0.0 && landMass < 0.12;
 
     if (landMass < 0.0) {
-      // Narrower shallow shelf → more true deep ocean (navy) for Humankind coasts
-      terrainId = landMass < -0.06 ? Terrain.DeepWater : Terrain.ShallowWater;
-      if (landMass > -0.02) terrainId = Terrain.ShallowWater;
+      // Broader shallow shelf for Civ/HK turquoise→navy layering
+      terrainId = landMass < -0.12 ? Terrain.DeepWater : Terrain.ShallowWater;
+      if (landMass > -0.04) terrainId = Terrain.ShallowWater;
       elev = 0;
       moisture = 1;
     } else {
@@ -213,9 +216,9 @@ export function generateMap(opts: MapGenOptions): HexMap {
       moisture = moistNoise * 0.75 + (coastal ? 0.25 : 0) + (1 - elev) * 0.1;
       moisture = Math.min(1, Math.max(0, moisture));
 
-      if (elev > 0.65 || (spineMix > 0.6 && elev > 0.45)) {
+      if (elev > 0.58 || (spineMix > 0.52 && elev > 0.40)) {
         terrainId = Terrain.Mountains;
-      } else if (elev > 0.42 || (spineMix > 0.52 && elev > 0.32)) {
+      } else if (elev > 0.38 || (spineMix > 0.44 && elev > 0.28)) {
         terrainId = Terrain.Hills;
       } else if (temp < 0.22) {
         terrainId = Terrain.Tundra;
@@ -491,7 +494,7 @@ function carveValleys(map: HexMap, rng: () => number): void {
       const lr0 = Math.floor(idx / map.width);
       const lq0 = idx - lr0 * map.width;
       const c = map.getLocal(lq0, lr0);
-      c.elev = Math.max(0.02, c.elev * 0.72);
+      c.elev = Math.max(0.02, c.elev * 0.38);
       c.featureId = Feature.Riverbank;
       c.riverDist = 0;
     }
@@ -509,7 +512,7 @@ function carveValleys(map: HexMap, rng: () => number): void {
         break;
       }
     }
-    if (beside) cell.elev = Math.max(0.02, cell.elev * 0.85);
+    if (beside) cell.elev = Math.max(0.02, cell.elev * 0.62);
   });
 
   const dist = new Int16Array(map.width * map.height).fill(-1);

@@ -230,7 +230,8 @@ export function rawElev(map: HexMap, lq: number, lr: number): number {
 export function rawMountainW(map: HexMap, lq: number, lr: number): number {
   if (!map.inBoundsLocal(lq, lr) || isWaterLocal(map, lq, lr)) return 0;
   const e = map.getLocal(lq, lr).elev;
-  const t = Math.min(1, Math.max(0, (e - 0.38) / 0.24));
+  // Engage ridge displace earlier so spines read before the absolute peak.
+  const t = Math.min(1, Math.max(0, (e - 0.28) / 0.30));
   return t * t * (3 - 2 * t);
 }
 
@@ -479,19 +480,20 @@ export function displaceLandY(
   const landW = smoothstep(0.02, 0.09, elev) * dispW;
   const mtnW = smoothstep(0, 0.14, mountainW) * dispW;
   const md = fbm2(x * 1.1, z * 1.1);
-  const landAmp = 0.55 + 0.3 * mountainW;
-  const cliffBoost = smoothstep(0.35, 0.85, elev) * 0.26;
+  const landAmp = 0.55 - 0.15 * mountainW;
+  const cliffBoost = smoothstep(0.35, 0.85, elev) * 0.32;
   let dy = 0;
   if (enableDisplace) {
-    dy += ((md - 0.45) * 0.14 * landAmp + cliffBoost * elev) * U_ELEV * 0.7 * landW;
-    // Anisotropic ridge domain, mirrored from hexTerrain.vert.glsl: rp = R*p
-    // with a fixed 30° rotation, then q = rp * (0.32, 0.55).
+    dy += ((md - 0.45) * 0.12 * landAmp + cliffBoost * elev) * U_ELEV * 0.7 * landW;
+    // Mirrored from hexTerrain.vert.glsl anisotropic ridges.
     const rx = 0.866 * x - 0.5 * z;
     const rz = 0.5 * x + 0.866 * z;
-    const rd = ridgeFbm(rx * 0.32, rz * 0.55);
-    dy += (rd - 0.32) * 0.48 * mtnW * U_ELEV;
+    const rd = ridgeFbm(rx * 0.22, rz * 0.78);
+    dy += (rd - 0.28) * 0.78 * mtnW * U_ELEV;
+    const rd2 = ridgeFbm(rx * 0.55 + 2.1, rz * 1.35 - 1.3);
+    dy += (rd2 - 0.35) * 0.26 * mtnW * U_ELEV;
     const nd = fbm2(x * 0.55, z * 0.55);
-    dy += (nd - 0.4) * 0.12 * mtnW * U_ELEV;
+    dy += (nd - 0.4) * 0.07 * mtnW * U_ELEV;
   } else {
     dy += (md - 0.45) * 0.04 * U_ELEV * landW;
   }

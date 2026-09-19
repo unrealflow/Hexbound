@@ -316,14 +316,16 @@ float canopyField(vec2 xz, float t) {
   vec2 pw = xz + vec2(sin(t * 0.25 + xz.y) * 0.04, cos(t * 0.2 + xz.x) * 0.03);
   mat2 r1 = mat2(0.62, 0.78, -0.78, 0.62);
   mat2 r2 = mat2(0.17, 0.985, -0.985, 0.17);
-  float a = canopyOctave(pw * 1.05, 0.44, 1.5);
-  float b = canopyOctave(r1 * pw * 2.30 + vec2(7.3, 2.1), 0.56, 1.7);
-  float c = canopyOctave(r2 * pw * 4.15 + vec2(2.7, 9.4), 0.74, 2.0);
-  float dens = max(a, max(0.68 * b, 0.24 * c));
-  float clump = smoothstep(0.30, 0.62, fbm2(xz * 0.26 + 11.0));
-  dens *= 0.34 + 0.66 * clump;
-  // Micro breaks crowns / understory gaps
-  return clamp(dens * (0.62 + 0.52 * fbm2(pw * 3.4)), 0.0, 1.0);
+  // Slightly emptier fine octaves → fewer uniform dots, denser coarse crowns.
+  float a = canopyOctave(pw * 0.92, 0.38, 1.65);
+  float b = canopyOctave(r1 * pw * 2.05 + vec2(7.3, 2.1), 0.58, 1.75);
+  float c = canopyOctave(r2 * pw * 3.85 + vec2(2.7, 9.4), 0.78, 2.1);
+  float dens = max(a, max(0.72 * b, 0.22 * c));
+  // Larger-scale clump mask (Civ/HK grove language) + warped secondary gate.
+  float clump = smoothstep(0.34, 0.68, fbm2(xz * 0.22 + 11.0));
+  float clump2 = smoothstep(0.40, 0.72, warpedFbm(xz * 0.18 + 5.0, 1.2));
+  dens *= 0.22 + 0.52 * clump + 0.26 * clump2;
+  return clamp(dens * (0.58 + 0.55 * fbm2(pw * 3.1)), 0.0, 1.0);
 }
 
 // Height / occlusion proxy for canopy lighting

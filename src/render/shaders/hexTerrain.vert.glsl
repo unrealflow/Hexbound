@@ -57,30 +57,31 @@ void main() {
   float mtnW = smoothstep(0.0, 0.14, mountainW) * dispW;
   float forestWv = smoothstep(0.0, 0.16, forestW) * dispW;
 
-  // Continuous micro-relief on land tops (xz domain; welded amps)
+  // Continuous micro-relief on land tops (xz domain; welded amps).
+  // Dial micro amp DOWN on mountains so anisotropic ridges own the silhouette.
   if (landMask > 0.5) {
     vec3 md = fbm2d(pos.xz * 1.1);
-    float landAmp = mix(0.55, 0.85, mountainW);
-    float cliffBoost = smoothstep(0.35, 0.85, elev) * 0.26;
+    float landAmp = mix(0.55, 0.40, mountainW);
+    float cliffBoost = smoothstep(0.35, 0.85, elev) * 0.32;
     if (uEnableDisplace > 0.5) {
-      pos.y += ((md.x - 0.45) * 0.14 * landAmp + cliffBoost * elev) * uElevScale * 0.7 * landW;
+      pos.y += ((md.x - 0.45) * 0.12 * landAmp + cliffBoost * elev) * uElevScale * 0.7 * landW;
     } else {
       pos.y += (md.x - 0.45) * 0.04 * uElevScale * landW;
     }
   }
 
-  // Mountains: low-frequency ridge along the spine (not per-hex lumps). The
-  // ridge domain is anisotropic — stretched along a fixed 30° direction — so
-  // octaves come out as elongated ranges instead of isotropic worm bumps. The
-  // CPU replica (terrainContinuity.displaceLandY) and the fragment relief
-  // normal must use the same constants.
+  // Mountains: anisotropic ridged ranges (narrow crest, elongated spine).
+  // Constants mirrored in terrainContinuity.displaceLandY + fragment relief.
   if (uEnableDisplace > 0.5) {
     vec2 rp = mat2(0.866, 0.5, -0.5, 0.866) * pos.xz;
-    vec3 rd = ridgeFbmd(rp * vec2(0.32, 0.55));
-    float ridgeAmp = 0.48 * mtnW * uElevScale;
-    pos.y += (rd.x - 0.32) * ridgeAmp;
+    vec3 rd = ridgeFbmd(rp * vec2(0.22, 0.78));
+    float ridgeAmp = 0.78 * mtnW * uElevScale;
+    pos.y += (rd.x - 0.28) * ridgeAmp;
+    // Higher-frequency crest chips for readable peaks (not worm bumps).
+    vec3 rd2 = ridgeFbmd(rp * vec2(0.55, 1.35) + vec2(2.1, -1.3));
+    pos.y += (rd2.x - 0.35) * 0.26 * mtnW * uElevScale;
     vec3 nd = fbm2d(pos.xz * 0.55);
-    pos.y += (nd.x - 0.4) * 0.12 * mtnW * uElevScale;
+    pos.y += (nd.x - 0.4) * 0.07 * mtnW * uElevScale;
   }
 
   // Soft terrace: only low-relief mid-elev, continuous, amp <= 0.04 * uElevScale

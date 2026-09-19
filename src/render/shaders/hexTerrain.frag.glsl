@@ -48,6 +48,8 @@ float gSandW;
 float gTundraW;
 float gMtnW;
 float gFidW;
+/** Shore SDF water coverage — main() flattens normals / kills shelf needles with this. */
+float gWaterSurf = 0.0;
 /** Relief-perturbed normal built from the continuous world-xz displacement
  *  field; per-vertex gradients are constant per cell fan, so interpolating them
  *  creased the shading along every hex edge. */
@@ -89,10 +91,10 @@ vec3 rockStrata(vec3 wp, float elev, float slope) {
   float bandVar = mod(floor(bandCoord), 5.0) / 5.0;
   float bandFrac = fract(bandCoord);
 
-  vec3 rockDark = vec3(80.0, 70.0, 60.0) / 255.0;
-  vec3 rockOchre = vec3(150.0, 110.0, 70.0) / 255.0;
-  vec3 rockLite = vec3(190.0, 170.0, 130.0) / 255.0;
-  vec3 rockBrick = vec3(140.0, 70.0, 50.0) / 255.0;
+  vec3 rockDark = vec3(72.0, 62.0, 52.0) / 255.0;
+  vec3 rockOchre = vec3(168.0, 118.0, 72.0) / 255.0;
+  vec3 rockLite = vec3(178.0, 158.0, 122.0) / 255.0;
+  vec3 rockBrick = vec3(148.0, 78.0, 52.0) / 255.0;
 
   vec3 rock = mix(rockDark, rockOchre, smoothstep(0.0, 0.55, bandVar));
   rock = mix(rock, rockLite, smoothstep(0.45, 1.0, bandVar) * 0.65);
@@ -114,15 +116,16 @@ vec3 rockStrata(vec3 wp, float elev, float slope) {
 vec3 biomePalette(float tid, float moist, float elev, float waterGate) {
   float m = clamp(moist, 0.0, 1.0);
   float e = clamp(elev, 0.0, 1.0);
-  vec3 plains = mix(vec3(0.36, 0.46, 0.15), vec3(0.58, 0.60, 0.24), 0.2 + m * 0.6);
-  plains = mix(plains, vec3(0.66, 0.56, 0.30), (1.0 - m) * 0.45);
-  vec3 grass = mix(vec3(0.10, 0.26, 0.07), vec3(0.20, 0.44, 0.12), 0.25 + m * 0.55);
-  grass = mix(grass, vec3(0.38, 0.58, 0.18), smoothstep(0.45, 0.9, m) * 0.6);
-  vec3 sand = mix(vec3(0.74, 0.56, 0.30), vec3(0.94, 0.80, 0.50), e * 0.4);
-  vec3 tundra = mix(vec3(0.42, 0.45, 0.42), vec3(0.66, 0.72, 0.72), 0.35 + e * 0.4);
-  vec3 hills = mix(grass, vec3(0.46, 0.35, 0.21), 0.28);
-  vec3 rock = mix(vec3(0.28, 0.26, 0.24), vec3(0.50, 0.51, 0.53), e);
-  vec3 water = vec3(0.18, 0.55, 0.64);
+  // Civ6/Humankind warm layered land: golden plains, lime grass, ochre dry.
+  vec3 plains = mix(vec3(0.42, 0.52, 0.16), vec3(0.66, 0.68, 0.26), 0.25 + m * 0.55);
+  plains = mix(plains, vec3(0.72, 0.58, 0.28), (1.0 - m) * 0.50);
+  vec3 grass = mix(vec3(0.14, 0.32, 0.08), vec3(0.28, 0.52, 0.14), 0.28 + m * 0.55);
+  grass = mix(grass, vec3(0.46, 0.66, 0.20), smoothstep(0.40, 0.9, m) * 0.65);
+  vec3 sand = mix(vec3(0.80, 0.60, 0.32), vec3(0.96, 0.84, 0.54), e * 0.45);
+  vec3 tundra = mix(vec3(0.40, 0.44, 0.40), vec3(0.62, 0.70, 0.72), 0.35 + e * 0.4);
+  vec3 hills = mix(grass, vec3(0.52, 0.38, 0.22), 0.34);
+  vec3 rock = mix(vec3(0.26, 0.23, 0.20), vec3(0.46, 0.44, 0.42), e);
+  vec3 water = vec3(0.16, 0.52, 0.62);
   float w0 = clamp(1.0 - abs(tid - 0.0), 0.0, 1.0);
   float w1 = clamp(1.0 - abs(tid - 1.0), 0.0, 1.0);
   float w2 = clamp(1.0 - abs(tid - 2.0), 0.0, 1.0);
@@ -202,30 +205,30 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
   // analytic gradient instead. (The wall-face branch is gone with the wall
   // geometry — every fragment is a top face.)
   {
-    float landWf = smoothstep(0.02, 0.09, elevW);
+    // Never apply land displacement normals on water — elev bleed near the shelf
+    // tilted gReliefNrm and, with specular, painted diagonal white needles.
+    float seaKill = 1.0 - smoothstep(-0.15, 0.05, sdW);
+    float landWf = smoothstep(0.02, 0.09, elevW) * seaKill;
     float dHx = 0.0;
     float dHz = 0.0;
     vec3 md = fbm2d(p * 1.1);
-    float mMicro = 0.14 * mix(0.55, 0.85, mtnW) * uElevScale * 0.7;
+    float mMicro = 0.12 * mix(0.55, 0.40, mtnW) * uElevScale * 0.7;
     dHx += md.y * 1.1 * mMicro * landWf;
     dHz += md.z * 1.1 * mMicro * landWf;
-    // Same anisotropic ridge domain as the vertex displacement: rp = R*p, then
-    // q = rp * (0.32, 0.55), so dV/dp = J^T * (dV/dq) with J = diag(0.32,0.55)*R.
     vec2 rp = mat2(0.866, 0.5, -0.5, 0.866) * p;
-    vec3 rd = ridgeFbmd(rp * vec2(0.32, 0.55));
-    float mRidge = 0.48 * mtnW * uElevScale;
-    dHx += (rd.y * 0.32 * 0.866 + rd.z * 0.55 * 0.5) * mRidge;
-    dHz += (-rd.y * 0.32 * 0.5 + rd.z * 0.55 * 0.866) * mRidge;
+    vec3 rd = ridgeFbmd(rp * vec2(0.22, 0.78));
+    float mRidge = 0.78 * mtnW * uElevScale * seaKill;
+    dHx += (rd.y * 0.22 * 0.866 + rd.z * 0.78 * 0.5) * mRidge;
+    dHz += (-rd.y * 0.22 * 0.5 + rd.z * 0.78 * 0.866) * mRidge;
+    vec3 rd2 = ridgeFbmd(rp * vec2(0.55, 1.35) + vec2(2.1, -1.3));
+    float mCrest = 0.26 * mtnW * uElevScale * seaKill;
+    dHx += (rd2.y * 0.55 * 0.866 + rd2.z * 1.35 * 0.5) * mCrest;
+    dHz += (-rd2.y * 0.55 * 0.5 + rd2.z * 1.35 * 0.866) * mCrest;
     vec3 nd = fbm2d(p * 0.55);
-    float mDet = 0.12 * mtnW * uElevScale;
+    float mDet = 0.07 * mtnW * uElevScale * seaKill;
     dHx += nd.y * 0.55 * mDet;
     dHz += nd.z * 0.55 * mDet;
-    vec3 relief = normalize(vec3(-dHx * 0.70, 1.0, -dHz * 0.70));
-    // 0.85 → 0.70: the vertex shader already displaces by this field, so a
-    // full-strength normal here double-counts the relief and is what made the
-    // massif read as packed worm lumps rather than lit rock. The value still
-    // matches the displaced silhouette; only the shading exaggeration is dialed
-    // back.
+    vec3 relief = normalize(vec3(-dHx * 0.85, 1.0, -dHz * 0.85));
     gReliefNrm = relief;
     slope = 1.0 - clamp(gReliefNrm.y, 0.0, 1.0);
   }
@@ -248,17 +251,20 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
   // step over a 1-2 cell wavelength, otherwise the waterline keeps drawing the
   // data lattice as a zig-zag; the transition band stays ~1 step wide so no
   // thin line shows up at the coast.
-  float coastN = (fbm2(p * 0.33 + 21.0) - 0.5) * 0.15 + (fbm2(p * 0.95) - 0.5) * 0.05;
-  float waterMask = smoothstep(-0.07, 0.07, sdW + coastN);
+  // Gentle low-freq shore warp only — high-freq terms read as coastal wrinkles.
+  float coastN = (fbm2(p * 0.18 + 21.0) - 0.5) * 0.06;
+  float waterMask = smoothstep(-0.11, 0.11, sdW + coastN);
+  gWaterSurf = waterMask;
   // One continuous switch, so no medium boundary is ever drawn as a line.
   vec3 pal = mix(palLand, palWater, waterMask);
 
   vec3 albedo = pal;
-  // Two scales of world-space mottle: without the sub-cell term a cell interior
-  // is a flat patch of one biome colour, which reads as a hex tile.
-  albedo *= 0.90 + 0.14 * mottled + 0.08 * (warpedFbm(p * 4.2, 1.1) - 0.5);
+  // Land-only mottle: applying warped FBM on water painted the diagonal worm
+  // stripes the user circled in shallow turquoise.
+  float landOnly = 1.0 - waterMask;
+  albedo *= mix(1.0, 0.90 + 0.14 * mottled + 0.08 * (warpedFbm(p * 4.2, 1.1) - 0.5), landOnly);
   albedo = mix(microDetail(albedo, uGrassTex, p, 1.8, 0.10, 0.9), albedo, waterMask);
-  albedo = mix(albedo, microDetail(albedo, uSandTex, p, 5.0, 0.05, 1.4), sandW * (1.0 - waterMask));
+  albedo = mix(albedo, microDetail(albedo, uSandTex, p, 5.0, 0.05, 1.4), sandW * landOnly);
 
   vec3 soil = vec3(0.46, 0.35, 0.21);
   vec3 grassTint = mix(vec3(0.10, 0.26, 0.07), vec3(0.20, 0.44, 0.12), 0.25 + moist * 0.55);
@@ -269,22 +275,29 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
   float alt = vWorldPos.y;
   float altNorm = smoothstep(1.4, 3.1, alt);
   rock = mix(rock * vec3(1.04, 1.0, 0.94), rock * vec3(0.94, 0.96, 1.0), altNorm * 0.6);
-  // High rock has to sit clearly below the snow's luma or the whole upper
-  // massif reads as one pale sheet with no snow line. The crest albedo was
-  // measured at ~0.55-0.6 against snow at ~0.8 — not enough separation.
-  rock *= mix(1.0, 0.76, smoothstep(1.3, 2.5, alt));
+  // Dark mid rock + lit snow: high contrast snow line (Civ6 peaks).
+  rock *= mix(1.0, 0.58, smoothstep(1.4, 3.2, alt));
+  rock = mix(rock, rock * vec3(0.62, 0.58, 0.55), smoothstep(0.14, 0.42, slope) * 0.72);
   float scree = smoothstep(0.45, 0.15, crack);
-  rock = mix(rock, rock * 0.72, scree * 0.4);
-  // Snow band = 70-90% of the measured displaced peak (seed 20260916: 2.63).
-  float snowN = (fbm2(p * 2.0 + 1.5) - 0.5) * 0.30;
-  float snowLine = smoothstep(1.47, 1.89, alt + snowN);
-  snowLine *= smoothstep(0.55, 0.25, slope);
-  snowLine *= 0.65 + 0.35 * fbm2(p * 2.4);
-  float snowLit = clamp(dot(n, normalize(uSunDir)) * 0.5 + 0.5, 0.0, 1.0);
-  vec3 snow = mix(vec3(0.78, 0.84, 0.92), vec3(0.955, 0.975, 1.0), snowLit);
-  snow *= 0.92 + 0.1 * fbm2(p * 3.0);
+  rock = mix(rock, rock * 0.65, scree * 0.5);
+  // Snow from displaced world-Y + elevW (taller ridges after spine/ridge bump).
+  float snowN = (fbm2(p * 2.2 + 1.5) - 0.5) * 0.22 + (fbm2(p * 5.0 + 8.0) - 0.5) * 0.10;
+  float snowH = smoothstep(1.85, 2.65, alt + snowN);
+  float snowE = smoothstep(0.52, 0.78, elevW);
+  float snowLine = snowH * (0.45 + 0.55 * snowE);
+  // Prefer crests/plateaus; allow light snow into mild lee bowls via noise.
+  snowLine *= mix(smoothstep(0.72, 0.22, slope), 1.0, 0.25 * fbm2(p * 3.1));
+  snowLine *= 0.40 + 0.60 * fbm2(p * 2.6);
+  float alpine = smoothstep(1.45, 2.05, alt + snowN * 0.4) * (1.0 - snowLine);
+  alpine *= smoothstep(0.55, 0.18, slope);
+  rock = mix(rock, mix(rock, vec3(0.68, 0.70, 0.74), 0.6), clamp(alpine, 0.0, 1.0) * 0.7);
+  float snowLit = clamp(dot(gReliefNrm, normalize(uSunDir)) * 0.5 + 0.5, 0.0, 1.0);
+  vec3 snow = mix(vec3(0.88, 0.91, 0.96), vec3(1.0, 1.0, 1.0), snowLit);
+  // Shadowed snow in concave relief (into bowls / lee).
+  float bowl = smoothstep(0.55, 0.95, gReliefNrm.y) * (1.0 - snowLit);
+  snow = mix(snow, vec3(0.72, 0.78, 0.88), bowl * 0.45);
   rock = mix(rock, snow, clamp(snowLine, 0.0, 1.0));
-  albedo = mix(albedo, rock, max(mtnW, snowLine) * (1.0 - waterMask));
+  albedo = mix(albedo, rock, max(mtnW * 0.85 + snowLine * 0.5, snowLine) * (1.0 - waterMask));
   float relY = gReliefW * 2.0;
   float rampBand = smoothstep(0.14, 0.22, relY) * (1.0 - smoothstep(0.42, 0.50, relY));
   if (vFaceKind < 0.5 && waterMask < 0.5) {
@@ -299,45 +312,37 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
   // The distance has to be used across its whole range: with a 0.60 gain and a
   // navy ramp starting at 0.40 the deepest water only reached ~55% navy, so the
   // open sea stayed a uniform milky teal with no readable depth.
-  float depth = clamp(sdW * 0.95 + (fbm2(p * 1.30) - 0.5) * 0.18 + (fbm2(p * 3.10 + 4.0) - 0.5) * 0.08, 0.0, 1.0);
-  // Shallow water must not out-brighten the land, or the shore paint reads as a
-  // white line drawn along the coast: keep the near-shore colour saturated and
-  // the caustic lift small.
-  // Three-stop water profile: a darker wet contact at the waterline, a pale
-  // turquoise shelf, then navy.
-  vec3 water = mix(vec3(0.10, 0.26, 0.30), vec3(0.22, 0.50, 0.55), smoothstep(0.01, 0.22, depth));
-  water = mix(water, vec3(0.04, 0.13, 0.32), smoothstep(0.28, 0.68, depth));
-  float caust = fbm2(p * 3.0 + uTime * 0.14);
-  float caust2 = fbm2(p * 5.0 - uTime * 0.1 + 4.0);
-  float shallowW = 1.0 - smoothstep(0.05, 0.45, depth);
-  // The product of two low-frequency fbms is a cellular marble pattern; at lift
-  // 0.22 the shelf read as sculpted worm lumps instead of light on water.
-  water = mix(water, water * 1.08 + vec3(0.008, 0.014, 0.014), caust * caust2 * 0.12 * shallowW);
-  water = microDetail(water, uNoiseTex, p, 1.0, 0.04, 0.5);
-  // `step(0.5, vFaceKind)` alone means "wall faces only", so the whole water
-  // stack (depth shelf, caustics, water colour) never reached the visible sea:
-  // the sea colour came from the per-cell palette instead, which is what painted
-  // the pale shallow rim on the waterline and the cell-shaped shallow patches.
+  // Humankind shelf: clear turquoise → teal → saturated navy. Wide soft ramps.
+  // Tiny low-freq darkening only (no diagonal/high-contrast).
+  float depth = clamp(sdW * 1.05, 0.0, 1.0);
+  float bed = (fbm2(p * 0.22 + 3.0) - 0.5) * 0.025; // barely-there seafloor
+  vec3 water = mix(vec3(0.18, 0.55, 0.52), vec3(0.22, 0.68, 0.62), smoothstep(0.00, 0.22, depth + bed));
+  water = mix(water, vec3(0.08, 0.40, 0.55), smoothstep(0.18, 0.48, depth));
+  water = mix(water, vec3(0.03, 0.12, 0.34), smoothstep(0.42, 0.88, depth));
   float topFaceW = 1.0 - step(0.5, vFaceKind);
   albedo = mix(albedo, water, waterMask * topFaceW);
-  // Contact water: keep the first ~half step of water DARKER than the shelf, so
-  // the waterline is not the brightest line in the neighbourhood.
-  float contact = (1.0 - smoothstep(0.0, 0.085, sdW + coastN)) * waterMask * topFaceW;
-  albedo = mix(albedo, vec3(0.09, 0.22, 0.28), contact * 0.7);
+  // Soft continuous foam ribbon on the SDF (HK shore stroke — not grit).
+  float foam = 1.0 - smoothstep(0.012, 0.055, abs(sdW + coastN - 0.02));
+  foam *= waterMask * topFaceW;
+  albedo = mix(albedo, vec3(0.78, 0.88, 0.90), foam * 0.28);
 
   // --- Forest / rainforest canopy (Rainforest treesMap color language) ---
-  float coverAmt = smoothstep(0.18, 0.82, forestW + (fbm2(p * 0.90) - 0.5) * 1.10 + (fbm2(p * 2.3 + 17.0) - 0.5) * 0.45);
+  // Bake already fractal-upsampled forestCover (paper G2). Light world warp only.
+  float coverNoise = (fbm2(p * 0.70 + 9.0) - 0.5) * 0.28
+                   + (warpedFbm(p * 0.55, 1.2) - 0.5) * 0.22;
+  float coverAmt = smoothstep(0.20, 0.72, forestW + coverNoise);
+  coverAmt *= smoothstep(0.16, 0.48, forestW);
   if (coverAmt > 0.02 && waterMask < 0.5 && vFaceKind < 0.5) {
     float canopy = canopyField(p, uTime) * coverAmt;
     float canopyH = canopyHeightFactor(p, uTime) * coverAmt;
     float farLod = smoothstep(16.0, 40.0, camDist);
     float isRain = smoothstep(1.2, 1.8, fid);
 
-    // Dark understory → mid → sunlit crown (warm greens, not teal)
-    vec3 canopyDark = mix(vec3(0.035, 0.10, 0.03), vec3(0.03, 0.09, 0.035), isRain);
-    vec3 canopyMid  = mix(vec3(0.09, 0.25, 0.06), vec3(0.07, 0.22, 0.07), isRain);
-    vec3 canopyHi   = mix(vec3(0.22, 0.43, 0.10), vec3(0.16, 0.38, 0.11), isRain);
-    vec3 canopyWarm = mix(vec3(0.44, 0.54, 0.14), vec3(0.22, 0.42, 0.10), isRain);
+    // Dark understory → mid → sunlit crown (warm greens, Civ/HK clump language)
+    vec3 canopyDark = mix(vec3(0.028, 0.085, 0.025), vec3(0.025, 0.08, 0.030), isRain);
+    vec3 canopyMid  = mix(vec3(0.10, 0.28, 0.06), vec3(0.08, 0.24, 0.07), isRain);
+    vec3 canopyHi   = mix(vec3(0.28, 0.50, 0.12), vec3(0.18, 0.42, 0.12), isRain);
+    vec3 canopyWarm = mix(vec3(0.52, 0.62, 0.16), vec3(0.26, 0.46, 0.11), isRain);
 
     vec3 canopyCol = mix(canopyDark, canopyMid, smoothstep(0.12, 0.5, canopy));
     canopyCol = mix(canopyCol, canopyHi, smoothstep(0.4, 0.85, canopyH));
@@ -373,7 +378,7 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
     float cVp = canopyHeightFactor(p + vec2(0.0, 0.3), uTime) - canopyHeightFactor(p - vec2(0.0, 0.3), uTime);
     vec3 cN = normalize(vec3(-cUp * 1.9, 1.0, -cVp * 1.9));
     float cLight = clamp(dot(cN, normalize(uSunDir)), 0.0, 1.0);
-    albedo *= mix(0.55, 1.3, cLight);
+    albedo *= mix(0.48, 1.38, cLight);
 
     // Near LOD: trunk suggestion. Rotated and at a scale that shares no period
     // with the crown lattice, so it cannot reinforce it into a grid.
@@ -402,10 +407,16 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
   // 1 - gShoreW is river proximity. Placed after the canopy so a river through
   // forest stays visible; the moist bank + narrow water ribbon make the carved
   // lowland readable at range.
+  // riverDist (tex1.R on land): geometry already carved deeper in mapgen;
+  // shade a clear bank + water ribbon so valleys read at overview.
   float riverProx = clamp(1.0 - gShoreW, 0.0, 1.0) * (1.0 - waterMask);
-  albedo = mix(albedo, vec3(0.18, 0.33, 0.15), smoothstep(0.25, 0.90, riverProx) * 0.55);
-  albedo = mix(albedo, vec3(0.20, 0.42, 0.44), smoothstep(0.72, 0.98, riverProx) * 0.6);
-  albedo *= 1.0 - 0.20 * smoothstep(0.70, 1.0, riverProx);
+  float bank = smoothstep(0.12, 0.82, riverProx);
+  float ribbon = smoothstep(0.55, 0.96, riverProx);
+  albedo = mix(albedo, vec3(0.14, 0.32, 0.12), bank * 0.72);
+  albedo = mix(albedo, vec3(0.10, 0.34, 0.46), ribbon * 0.92);
+  albedo *= 1.0 - 0.35 * ribbon;
+  float riverSpec = pow(max(dot(gReliefNrm, normalize(uSunDir + normalize(uCamPos - wp))), 0.0), 22.0);
+  albedo += vec3(0.18, 0.32, 0.40) * riverSpec * ribbon * 0.55;
 
   float marshW = clamp(1.0 - abs(fid - 3.0), 0.0, 1.0) * (1.0 - waterW);
   if (marshW > 0.05 && vFaceKind < 0.5) {
@@ -425,32 +436,23 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
     // offshore; one hex step ~= 0.108). The old masks keyed off the per-cell
     // water flag, so their window was a sliver pinned to the hex boundary and
     // painted a pale line straight along the coast.
-    float s = sdW + (fbm2(p * 1.35 + 11.0) - 0.5) * 0.09 + (fbm2(p * 3.4) - 0.5) * 0.035 + coastN;
-    // Damp sand in the first cell of land (measured: a pale band peaking at the
-    // waterline leaves a +1.5% luma rim that reads as a white line), dry pale
-    // sand further inland where it borders ordinary terrain instead.
-    float wet = smoothstep(-0.26, -0.02, s) * (1.0 - smoothstep(-0.02, 0.06, s));
-    wet *= (1.0 - waterMask) * (0.60 + 0.40 * fbm2(p * 1.7 + 5.0));
-    albedo = mix(albedo, vec3(0.50, 0.45, 0.36), wet * 0.28);
-    float dry = smoothstep(-0.62, -0.26, s) * (1.0 - smoothstep(-0.28, -0.10, s));
-    dry *= (1.0 - waterMask) * (0.55 + 0.45 * fbm2(p * 1.1 + 5.0));
-    albedo = mix(albedo, vec3(0.76, 0.70, 0.55), dry * 0.10);
+    // Beach follows smooth SDF (+ tiny coastN); no mid/high-freq shore scrapes.
+    float s = sdW + coastN;
+    float wet = smoothstep(-0.42, -0.02, s) * (1.0 - smoothstep(-0.02, 0.08, s));
+    wet *= (1.0 - waterMask);
+    albedo = mix(albedo, vec3(0.74, 0.60, 0.42), wet * 0.55);
+    float dry = smoothstep(-0.95, -0.32, s) * (1.0 - smoothstep(-0.36, -0.06, s));
+    dry *= (1.0 - waterMask);
+    albedo = mix(albedo, vec3(0.90, 0.78, 0.58), dry * 0.34);
 
-    // Surf: broken patches a fraction of a unit offshore, width driven by noise,
-    // so it reads as breaking water instead of a rim drawn along the coast.
-    float surfN = fbm2(p * 1.7 + 9.0);
-    float surfBand = 1.0 - smoothstep(0.020, 0.055 + 0.070 * surfN, abs(sdW - (0.080 + 0.050 * surfN)));
-    surfBand *= smoothstep(0.45, 0.80, fbm2(p * 2.6 + uTime * 0.04));
-    albedo = mix(albedo, vec3(0.70, 0.82, 0.85), clamp(surfBand, 0.0, 1.0) * waterMask * 0.22);
-
-    // No white overlay on the land side: that is what read as a line drawn
-    // along the coast.
+    // Foam/surf disabled — white grit on turquoise was part of the ugly shallow look.
   }
 
-  // Micro contrast + regional drift + broad continuous tint (no flat cell patches)
+  // Land-only regional tint; never modulate water (FBM on shelf = worm stripes).
   float broad = fbm2(p * 0.32 + 7.0);
-  albedo *= 0.90 + 0.20 * broad;
-  albedo *= 0.96 + 0.07 * regional;
+  float landTint = 1.0 - waterMask;
+  albedo *= mix(1.0, 0.90 + 0.20 * broad, landTint);
+  albedo *= mix(1.0, 0.96 + 0.07 * regional, landTint);
   return albedo;
 }
 
@@ -468,36 +470,30 @@ void main() {
   float camDist = length(uCamPos - vWorldPos);
 
   vec3 albedo = terrainAlbedo(vTerrainId, vFeatureId, vElev, vMoisture, vWorldPos, n, camDist);
-  // Smooth relief normal computed inside terrainAlbedo from the world-xz field.
   n = gReliefNrm;
 
-  // Animated micro-normals from blended fields (not per-hex ids)
+  // Land-only micro-normals. Water must not inherit sand/canopy/relief tilt.
+  float landN = 1.0 - smoothstep(0.12, 0.45, gWaterSurf);
   {
-    float wWaterN = smoothstep(0.25, 0.45, gWaterW) * (1.0 - step(0.5, vFaceKind));
-    if (uUseDetailTex > 0.5) {
-      vec2 uv1 = vWorldPos.xz * 0.09 + vec2(uTime * 0.02, uTime * 0.014);
-      vec2 uv2 = vWorldPos.xz * 0.16 - vec2(uTime * 0.016, -uTime * 0.011);
-      vec3 tn1 = texture2D(uWaterNormalTex, uv1).xyz * 2.0 - 1.0;
-      vec3 tn2 = texture2D(uWaterNormalTex, uv2).xyz * 2.0 - 1.0;
-      vec3 tn = normalize(tn1 + tn2);
-      float ripple = mix(0.04, 0.08, 1.0 - smoothstep(0.05, 0.5, gShoreW)) * wWaterN;
-      n = normalize(n + vec3(tn.x, 0.0, tn.y) * ripple);
-    } else {
-      float wx = fbm2(vWorldPos.xz * 2.8 + uTime * 0.4);
-      float wz = fbm2(vWorldPos.xz * 2.8 + 17.0 - uTime * 0.34);
-      n = normalize(n + vec3((wx - 0.5) * 0.4, 0.0, (wz - 0.5) * 0.4) * wWaterN);
-    }
-    float wSandN = smoothstep(0.25, 0.45, gSandW) * (1.0 - step(0.5, vFaceKind));
-    // Dune ripples live in patches and at low contrast. At amp 0.05 the sine ran
-    // across the whole desert as uniform N-S pleats: the albedo field view is
-    // smooth there, so the stripes were pure normal shading, and their ~0.57 wu
-    // period matches this term exactly.
+    float wSandN = smoothstep(0.25, 0.45, gSandW) * (1.0 - step(0.5, vFaceKind)) * landN;
     float duneMask = smoothstep(0.35, 0.65, fbm2(vWorldPos.xz * 0.5 + 3.0));
     float rip = sin(dot(vWorldPos.xz, normalize(vec2(1.2, 0.4))) * 11.0 + fbm2(vWorldPos.xz * 2.0) * 2.5);
     n = normalize(n + vec3(rip * 0.018, 0.0, rip * 0.011) * wSandN * duneMask);
-    float wForestN = smoothstep(0.22, 0.44, gForestW) * (1.0 - step(0.5, vFaceKind));
+    float wForestN = smoothstep(0.22, 0.44, gForestW) * (1.0 - step(0.5, vFaceKind)) * landN;
     float c = canopyField(vWorldPos.xz, uTime) * wForestN;
     n = normalize(n + vec3((c - 0.5) * 0.45, 0.2 + c * 0.2, (fbm2(vWorldPos.zx * 2.4) - 0.5) * 0.35) * wForestN);
+  }
+  // HARD flatten water normals → calm mirror shelf (kills diagonal white needles).
+  // uWaterNormalTex amp = 0 on the shelf; deep water gets a whisper only.
+  float wFlat = smoothstep(0.08, 0.42, gWaterSurf);
+  n = normalize(mix(n, vec3(0.0, 1.0, 0.0), wFlat));
+  {
+    float deepOnly = smoothstep(0.55, 0.95, gShoreW) * wFlat;
+    if (uUseDetailTex > 0.5 && deepOnly > 0.01) {
+      vec2 uv1 = vWorldPos.xz * 0.03 + vec2(uTime * 0.005, 0.0);
+      vec3 tn1 = texture2D(uWaterNormalTex, uv1).xyz * 2.0 - 1.0;
+      n = normalize(n + vec3(tn1.x, 0.0, tn1.y) * (0.008 * deepOnly));
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -510,9 +506,9 @@ void main() {
   float dom = clamp(0.5 + 0.5 * n.y, 0.0, 1.0);
   float fre = clamp(1.0 + dot(n, -normalize(uCamPos - vWorldPos)), 0.0, 1.0);
 
-  vec3 sunCol = vec3(1.34, 1.14, 0.86);
-  vec3 skyAmb = uSkyColor * 0.4;
-  vec3 groundAmb = uGroundAmbient * 0.7;
+  vec3 sunCol = vec3(1.42, 1.18, 0.82);
+  vec3 skyAmb = uSkyColor * 0.34;
+  vec3 groundAmb = uGroundAmbient * 0.78;
   vec3 hemi = mix(groundAmb, skyAmb, dom);
 
   float canopyT = 0.0;
@@ -528,44 +524,43 @@ void main() {
     hemi *= mix(vec3(1.0), vec3(0.82, 1.0, 0.78), isCanopy);
   }
 
-  // Base diffuse — stronger sun, weaker ambient (form definition). The old
-  // wall-only lifts (sun floor / ground-bounce ambient) are gone with the wall
-  // geometry: every fragment is a top face lit by the shared model below.
-  vec3 lit = albedo * (hemi * 0.32 + sunCol * ndl * 1.55 + sunCol * wrap * 0.09);
-
-  lit += albedo * sunCol * back * mix(0.05, 0.16, isCanopy);
-
+  // Land diffuse (form). Water uses a calm, almost-lambert fill — no slope AO
+  // stripes from residual relief.
+  float wSurf = smoothstep(0.12, 0.50, gWaterSurf);
+  vec3 litLand = albedo * (hemi * 0.26 + sunCol * ndl * 1.72 + sunCol * wrap * 0.10);
+  litLand += albedo * sunCol * back * mix(0.05, 0.16, isCanopy);
   if (canopyT > 0.0) {
     vec3 transCol = mix(vec3(0.30, 0.54, 0.14), vec3(0.20, 0.46, 0.12), smoothstep(1.2, 1.8, gFidW));
-    lit += transCol * sunCol * canopyT * 0.45;
+    litLand += transCol * sunCol * canopyT * 0.45;
   }
-
   float ao = 1.0 - smoothstep(0.0, 0.9, gElevW) * 0.14 - gReliefW * 0.10;
   ao *= mix(1.0, canopyOcc * 0.85 + 0.15, isCanopy);
   ao *= mix(0.66, 1.0, ndl * 0.5 + 0.5);
   float slopeShade = mix(0.62, 1.0, wrap);
-  lit *= ao * slopeShade;
+  litLand *= ao * slopeShade;
   vec3 shTint = mix(vec3(0.12, 0.16, 0.10), vec3(0.12, 0.11, 0.14), clamp(gMtnW, 0.0, 1.0));
-  lit = max(lit, albedo * shTint);
-
+  litLand = max(litLand, albedo * shTint);
   float cliffContact = (1.0 - clamp(n.y, 0.0, 1.0)) * gReliefW;
-  lit *= mix(1.0, 0.84, cliffContact * 0.55);
+  litLand *= mix(1.0, 0.84, cliffContact * 0.55);
+
+  // Calm water fill (HK glass shelf): stable ndl from flat n, no AO grit.
+  float ndlW = max(dot(vec3(0.0, 1.0, 0.0), L), 0.0);
+  vec3 litWater = albedo * (hemi * 0.42 + sunCol * ndlW * 0.95 + sunCol * 0.12);
+
+  vec3 lit = mix(litLand, litWater, wSurf);
 
   vec3 V = normalize(uCamPos - vWorldPos);
   vec3 H = normalize(L + V);
   {
-    float wWater = smoothstep(0.25, 0.45, gWaterW);
-    float isDeep = smoothstep(0.25, 0.75, gShoreW);
-    float spec = pow(max(dot(n, H), 0.0), 140.0);
-    float spec2 = pow(max(dot(n, H), 0.0), 26.0);
-    float sunGlare = pow(max(dot(reflect(-L, n), V), 0.0), 72.0);
-    // Branches become smooth weights: a threshold on a smooth field paints a contour.
-    lit += vec3(0.8, 0.93, 1.0) * spec * (0.85 - isDeep * 0.35) * wWater;
-    lit += vec3(0.28, 0.45, 0.6) * spec2 * (0.2 - isDeep * 0.09) * wWater;
-    lit += sunCol * sunGlare * (0.7 - isDeep * 0.3) * wWater;
-    // Sky reflection weaker on deep water so navy stays navy
-    vec3 skyRef = mix(uHorizonColor, uSkyColor, 0.6);
-    lit = mix(lit, skyRef * 0.9, fre * fre * (0.42 - isDeep * 0.22) * wWater);
+    float wWater = wSurf;
+    float isDeep = smoothstep(0.45, 0.90, gShoreW);
+    // Shelf: essentially no specular needles. Deep: faint broad sun sheen only.
+    float spec = pow(max(dot(n, H), 0.0), 24.0);
+    float sunGlare = pow(max(dot(reflect(-L, n), V), 0.0), 20.0);
+    lit += vec3(0.45, 0.62, 0.78) * spec * (0.04 + 0.22 * isDeep) * wWater;
+    lit += sunCol * sunGlare * (0.03 + 0.18 * isDeep) * wWater;
+    vec3 skyRef = mix(uHorizonColor, uSkyColor, 0.5);
+    lit = mix(lit, skyRef * 0.82, fre * fre * (0.14 + 0.16 * isDeep) * wWater);
 
     float wTundra = smoothstep(0.25, 0.45, gTundraW);
     float specT = pow(max(dot(n, H), 0.0), 64.0);
@@ -588,16 +583,16 @@ void main() {
   // mean 133 and spread 29.6, against 77 and 54.6 with fog disabled). Aerial
   // perspective is wanted at landmark scale, a veil is not.
   if (uEnableFog > 0.5) {
-    float density = 0.006;
-    vec3 fogCol = mix(uHorizonColor * 0.9, uSkyColor, 0.5);
-    fogCol = mix(fogCol, vec3(0.88, 0.78, 0.60), 0.3 * gSandW);
-    fogCol = mix(fogCol, vec3(0.45, 0.62, 0.78), 0.3 * gWaterW);
-    float heightAtten = mix(1.15, 0.45, clamp(vWorldPos.y / 3.0, 0.0, 1.0));
+    float density = 0.0042;
+    vec3 fogCol = mix(uHorizonColor * 0.92, uSkyColor, 0.42);
+    // Warm aerial tint near land, cool over water — avoid grey pastel veil.
+    fogCol = mix(fogCol, vec3(0.90, 0.80, 0.62), 0.28 * gSandW);
+    fogCol = mix(fogCol, vec3(0.42, 0.58, 0.76), 0.26 * gWaterW);
+    fogCol = mix(fogCol, vec3(0.78, 0.84, 0.72), 0.12 * (1.0 - gWaterW) * (1.0 - gSandW));
+    float heightAtten = mix(1.05, 0.40, clamp(vWorldPos.y / 3.0, 0.0, 1.0));
     lit = fogExtinct(lit, fogCol, camDist * heightAtten, density);
-    // Only the far rim fades now; at 36 units this was already taking 14% off the
-    // middle of the map, on top of the extinction above.
-    float farFade = smoothstep(70.0, 220.0, camDist);
-    lit = mix(lit, fogCol, farFade * 0.25);
+    float farFade = smoothstep(85.0, 240.0, camDist);
+    lit = mix(lit, fogCol, farFade * 0.18);
   }
 
   if (uShowWireHint > 0.5) {
@@ -606,17 +601,16 @@ void main() {
     lit *= 1.0 - darkRim * 0.10;
   }
 
-  // Grade + tonemap
-  lit *= 0.96;
+  // Grade + tonemap — warmer midtones, keep contrast (no wash-white).
+  lit *= 0.98;
   lit = tonemapFilmic(lit);
-  lit = pow(max(lit, vec3(0.0)), vec3(0.96));
+  lit = pow(max(lit, vec3(0.0)), vec3(0.94));
   float luma = dot(lit, vec3(0.2126, 0.7152, 0.0722));
-  lit = mix(vec3(luma), lit, 1.16);
-  // Gentler S-curve than pure smoothstep on 0-1
-  lit = mix(lit, lit * lit * (3.0 - 2.0 * lit), 0.5);
+  lit = mix(vec3(luma), lit, 1.22);
+  lit = mix(lit, lit * lit * (3.0 - 2.0 * lit), 0.58);
   lit = clamp(lit, 0.0, 1.0);
   float finalLuma = dot(lit, vec3(0.299, 0.587, 0.114));
-  lit = mix(lit * vec3(0.96, 0.98, 1.04), lit * vec3(1.03, 1.0, 0.96), smoothstep(0.3, 0.75, finalLuma));
+  lit = mix(lit * vec3(0.95, 0.98, 1.05), lit * vec3(1.06, 1.01, 0.94), smoothstep(0.28, 0.72, finalLuma));
 
   // Diagnostic field view (uDbgField != 0): paint the chosen field greyscale and
   // skip the lighting stack. Defaults to 0, so the shipping path is unchanged.

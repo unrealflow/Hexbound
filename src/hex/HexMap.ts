@@ -88,8 +88,58 @@ export interface HexCell {
  *  cell boundary. */
 const AREA_RADIUS_CELLS = 2.2;
 const BAND_RADIUS_CELLS = 1.8;
+/** Forest uses a tighter kernel so fractal upsample can own the edge shape. */
+const FOREST_RADIUS_CELLS = 1.55;
 /** World distance at which the baked signed shore distance saturates. */
-const SHORE_RANGE = 2.5;
+const SHORE_RANGE = 3.8;
+
+/** Tiny value-noise FBM for fractal upsample at bake time (paper §8 G2). */
+function bakeHash2(x: number, y: number, seed: number): number {
+  let n = Math.imul(x + seed * 374761393, 668265263) ^ Math.imul(y, 1274126177);
+  n = Math.imul(n ^ (n >>> 13), 1274126177);
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
+}
+function bakeValueNoise(x: number, y: number, seed: number): number {
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const fx = x - x0;
+  const fy = y - y0;
+  const sx = fx * fx * (3 - 2 * fx);
+  const sy = fy * fy * (3 - 2 * fy);
+  const a = bakeHash2(x0, y0, seed);
+  const b = bakeHash2(x0 + 1, y0, seed);
+  const c = bakeHash2(x0, y0 + 1, seed);
+  const d = bakeHash2(x0 + 1, y0 + 1, seed);
+  return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+}
+function bakeFbm(x: number, y: number, seed: number, octaves = 4): number {
+  let amp = 0.5;
+  let freq = 1;
+  let sum = 0;
+  let norm = 0;
+  for (let i = 0; i < octaves; i++) {
+    sum += amp * bakeValueNoise(x * freq, y * freq, seed + i * 101);
+    norm += amp;
+    amp *= 0.5;
+    freq *= 2;
+  }
+  return sum / norm;
+}
+/** Cell forestCover as low-freq amp + in-cell FBM detail → organic cover edges. */
+function fractalUpsampleForest(base: number, wx: number, wz: number): number {
+  if (base <= 0.02) return 0;
+  const n1 = bakeFbm(wx * 0.85 + 3.1, wz * 0.85, 9101, 4);
+  const n2 = bakeFbm(wx * 2.3 - 1.7, wz * 2.3 + 4.2, 9203, 3);
+  const warp = bakeFbm(wx * 0.45 + 8.0, wz * 0.45, 9307, 3) - 0.5;
+  const n3 = bakeFbm(wx * 1.4 + warp * 1.8, wz * 1.4 - warp * 1.5, 9409, 3);
+  // Detail vanishes at 0/1 so open plains stay open and dense cores stay dense.
+  const gate = 4.0 * base * (1 - base);
+  let v = base + (n1 - 0.5) * 0.55 * gate + (n2 - 0.5) * 0.35 * gate;
+  // Soft clump threshold in world space — breaks hex-shaped isocontours.
+  v = v * 0.62 + n3 * 0.38 * Math.sqrt(Math.max(base, 0.001));
+  return Math.max(0, Math.min(1, v));
+}
+
 
 export class HexMap {
   readonly width: number;
@@ -342,7 +392,7 @@ export class HexMap {
    * hexagon. `{ dist: true }` instead stores the signed shore distance, positive
    * offshore on a scale that saturates SHORE_RANGE world units out.
    */
-  private bakeRGBA(spec: { ch?: number; r?: number; dist?: boolean }[], sub: number): {
+  private bakeRGBA(spec: { ch?: number; r?: number; dist?: boolean; fractalForest?: boolean }[], sub: number): {
     data: Uint8Array;
     width: number;
     height: number;
@@ -402,7 +452,9 @@ export class HexMap {
                 const sd = HexMap.shoreDistance(segs, p.x, p.z) / SHORE_RANGE;
                 out[o + k] = toU8(0.5 + 0.5 * Math.max(-1, Math.min(1, sd)));
               } else {
-                out[o + k] = wSum[k] > 0 ? toU8(acc[k] / wSum[k]) : 0;
+                let v = wSum[k] > 0 ? acc[k] / wSum[k] : 0;
+                if (spec[k].fractalForest) v = fractalUpsampleForest(v, p.x, p.z);
+                out[o + k] = toU8(v);
               }
             }
           }
@@ -431,6 +483,7 @@ export class HexMap {
   packMapTextures(sub = 4): { tex0: Uint8Array; tex1: Uint8Array; width: number; height: number } {
     const A = AREA_RADIUS_CELLS;
     const B = BAND_RADIUS_CELLS;
+    const F = FOREST_RADIUS_CELLS;
     const a = this.bakeRGBA(
       [
         { ch: 0, r: A },
@@ -443,7 +496,7 @@ export class HexMap {
     const b = this.bakeRGBA(
       [
         { ch: 4, r: B },
-        { ch: 5, r: A },
+        { ch: 5, r: F, fractalForest: true },
         { dist: true },
         { ch: 7, r: A },
       ],
