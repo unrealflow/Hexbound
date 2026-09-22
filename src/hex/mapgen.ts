@@ -1,4 +1,5 @@
 import { Feature, HexMap, Terrain, type FeatureId, type TerrainId } from './HexMap';
+import { computeHydrology, CHANNEL_AREA_THRESHOLD, type HydrologyResult } from './hydrology';
 import { AXIAL_DIRS } from './coords';
 
 /** Tiny seeded PRNG (mulberry32). */
@@ -68,6 +69,112 @@ export interface MapGenOptions {
   height?: number;
 }
 
+/**
+ * Look-workflow P1 (docs/design/2026-09-19-hexbound-look-workflow.md §2): the
+ * legacy `max(spine, spine2)` ridge fields glue into one dome-shaped massif.
+ * Chain parameters add seeded polyline ridge chains — separate crests with a
+ * valley between, beaded into distinct peaks — which is the composition the
+ * Civ6 reference reads as. All default to OFF (legacy topology); the sweep
+ * grid picks the shipped values.
+ */
+export interface LookParams {
+  /** Ridge chains. 0 = legacy spine-only topology. */
+  chainCount: number;
+  /** Peak elevation boost on a chain core (elev units). */
+  chainAmp: number;
+  /** Chain half-width in cells. */
+  chainWidth: number;
+  /** How much of the legacy base elevation survives under/between chains —
+   *  lower reads as a wider inter-chain valley + piedmont belt. */
+  baseKeep: number;
+  /** Shore flattening skips cells whose chain mask exceeds this (a ridge that
+   *  reaches the sea keeps its slope instead of being shaved into a bun). */
+  shoreExempt: number;
+  /** Chain mask above this forces Mountains, so arid belts cannot paint a
+   *  ridge cream. */
+  mountainGate: number;
+  /** Desert only below this elevation — keeps arid belts off the highlands. */
+  desertElevMax: number;
+  /** Multiplier on the legacy quadratic spine boost. With chains on, the
+   *  legacy boost is what glues the dome back together — keep ~0.3. */
+  spineBoostKeep: number;
+}
+
+export const DEFAULT_LOOK: LookParams = {
+  // Sweep winner C1 (docs/shots/_sweep-p1-c/, seed 20260916): three beaded
+  // chains own the peaks, the legacy spine drops to texture level, and the
+  // inter-chain valley + piedmont belt reads green below the crests.
+  chainCount: 3,
+  chainAmp: 0.8,
+  chainWidth: 3.5,
+  baseKeep: 0.58,
+  shoreExempt: 0.45,
+  mountainGate: 0.5,
+  desertElevMax: 0.42,
+  spineBoostKeep: 0.12,
+};
+
+interface ChainPoint {
+  x: number;
+  y: number;
+  a: number;
+}
+
+/** One beaded polyline per chain, in cell coords, deterministic per seed. */
+function buildChains(width: number, height: number, seed: number, look: LookParams): ChainPoint[][] {
+  const chains: ChainPoint[][] = [];
+  for (let k = 0; k < look.chainCount; k++) {
+    const rand = mulberry32(seed + 7000 + k * 131);
+    const ang = (k / Math.max(1, look.chainCount)) * Math.PI + 0.4 + rand() * 0.6;
+    const cx = width * (0.5 + (rand() - 0.5) * 0.24);
+    const cy = height * (0.5 + (rand() - 0.5) * 0.24);
+    const halfLen = Math.min(width, height) * (0.42 + rand() * 0.12);
+    const dx = Math.cos(ang);
+    const dy = Math.sin(ang);
+    const w1 = (2 + rand() * 2) * Math.PI;
+    const p1 = rand() * Math.PI * 2;
+    const w2 = (5 + rand() * 3) * Math.PI;
+    const p2 = rand() * Math.PI * 2;
+    const wp = (3 + rand() * 2) * Math.PI;
+    const pp = rand() * Math.PI * 2;
+    const M = 48;
+    const pts: ChainPoint[] = [];
+    for (let m = 0; m <= M; m++) {
+      const t = m / M;
+      const along = (t - 0.5) * 2 * halfLen;
+      const perp = height * (0.05 * Math.sin(t * w1 + p1) + 0.028 * Math.sin(t * w2 + p2));
+      const x = cx + dx * along - dy * perp;
+      const y = cy + dy * along + dx * perp;
+      const taper = sstep(t / 0.12) * (1 - sstep((t - 0.88) / 0.12));
+      const amp = Math.max(0, 0.55 + 0.45 * Math.sin(t * wp + pp)) * taper;
+      pts.push({ x, y, a: amp });
+    }
+    chains.push(pts);
+  }
+  return chains;
+}
+
+function sstep(t: number): number {
+  const x = Math.min(1, Math.max(0, t));
+  return x * x * (3 - 2 * x);
+}
+
+/** Peak-node mask at a cell: max over chains of amplitude x (1-d/w)^2 falloff. */
+function chainMaskAt(chains: ChainPoint[][], x: number, y: number, look: LookParams): number {
+  let mask = 0;
+  for (const pts of chains) {
+    for (const p of pts) {
+      if (p.a <= 0) continue;
+      const d = Math.hypot(p.x - x, p.y - y);
+      if (d >= look.chainWidth) continue;
+      const u = 1 - d / look.chainWidth;
+      const v = p.a * u * u;
+      if (v > mask) mask = v;
+    }
+  }
+  return mask;
+}
+
 /** Filled by the last generateMap call (P1 one-shot stats). */
 export const p1Stats = {
   forestBlobsBefore: 0,
@@ -81,10 +188,12 @@ export const p1Stats = {
  * Seeded procedural map — larger coherent biomes, clearer coasts & mountain spines
  * (Civ / Humankind readability; avoids sparse white-ish hex noise).
  */
-export function generateMap(opts: MapGenOptions): HexMap {
+export function generateMap(opts: MapGenOptions & { look?: Partial<LookParams> }): HexMap {
   const width = opts.width ?? 40;
   const height = opts.height ?? 32;
   const seed = opts.seed | 0;
+  const look: LookParams = { ...DEFAULT_LOOK, ...opts.look };
+  const chains = buildChains(width, height, seed, look);
   const originQ = -Math.floor(width / 2);
   const originR = -Math.floor(height / 2);
   const map = new HexMap(width, height, originQ, originR);
@@ -92,10 +201,13 @@ export function generateMap(opts: MapGenOptions): HexMap {
 
   const elevField = new Float32Array(width * height);
   const landField = new Float32Array(width * height);
+  const chainMask = new Float32Array(width * height);
 
   map.forEach((_cell, lq, lr) => {
     const nx = lq / width;
     const ny = lr / height;
+    const mask = chainMaskAt(chains, lq, lr, look);
+    chainMask[lr * width + lq] = mask;
 
     // Lower-frequency domain warp → larger landmasses
     const warpX = fbm(nx * 1.2, ny * 1.2, seed + 200, 3) - 0.5;
@@ -127,12 +239,16 @@ export function generateMap(opts: MapGenOptions): HexMap {
 
     let elev = 0;
     if (landMass >= 0.0) {
-      // Most land stays low; peaks concentrate on spines (narrower, taller).
-      let e = 0.12 + elevNoise * 0.26 + Math.max(0, landMass) * 0.36;
+      // Most land stays low; peaks concentrate on spines (narrower, taller)
+      // and, when chains are enabled, on the beaded chain cores. baseKeep
+      // compresses the legacy base so the inter-chain valley + piedmont belt
+      // read below the crests.
+      let e = (0.12 + elevNoise * 0.26 + Math.max(0, landMass) * 0.36) * look.baseKeep;
       if (spineMix > 0.36) {
         const s = spineMix - 0.36;
-        e += s * s * 2.4 + s * 0.85;
+        e += (s * s * 2.4 + s * 0.85) * look.spineBoostKeep;
       }
+      e += mask * look.chainAmp;
       elev = Math.min(1, Math.max(0.08, e));
     }
     elevField[lr * width + lq] = elev;
@@ -168,6 +284,9 @@ export function generateMap(opts: MapGenOptions): HexMap {
     }
   }
   for (let i = 0; i < elevField.length; i++) {
+    // A chain core reaching the sea keeps its slope: flattening it would shave
+    // the ridge into a bun right where the reference reads a mountain arm.
+    if (chainMask[i]! > look.shoreExempt) continue;
     const dist = shoreCells[i]!;
     if (!(dist > 0) || !Number.isFinite(dist)) continue;
     const t = Math.min(1, (dist - 1) / 2);
@@ -216,13 +335,19 @@ export function generateMap(opts: MapGenOptions): HexMap {
       moisture = moistNoise * 0.75 + (coastal ? 0.25 : 0) + (1 - elev) * 0.1;
       moisture = Math.min(1, Math.max(0, moisture));
 
-      if (elev > 0.58 || (spineMix > 0.52 && elev > 0.40)) {
+      const mask = chainMask[lr * width + lq]!;
+      if (elev > 0.58 || (spineMix > 0.52 && elev > 0.40) || mask > look.mountainGate) {
         terrainId = Terrain.Mountains;
-      } else if (elev > 0.38 || (spineMix > 0.44 && elev > 0.28)) {
+      } else if (elev > 0.38 || (spineMix > 0.44 && elev > 0.28) || mask > look.mountainGate * 0.5) {
         terrainId = Terrain.Hills;
       } else if (temp < 0.22) {
         terrainId = Terrain.Tundra;
-      } else if ((aridBelt < 0.4 && moisture < 0.36 && temp > 0.42) || moisture < 0.18) {
+      } else if (
+        elev < look.desertElevMax &&
+        ((aridBelt < 0.4 && moisture < 0.36 && temp > 0.42) || moisture < 0.18)
+      ) {
+        // Desert stays on low dry ground: an arid belt over a highland painted
+        // the central dome cream, which is exactly the Civ6 anti-reference.
         terrainId = Terrain.Desert;
         if (hash2(q, r, seed + 44) < 0.45) featureId = Feature.Dunes;
       } else if (moisture > 0.45) {
@@ -337,7 +462,14 @@ export function generateMap(opts: MapGenOptions): HexMap {
   });
 
   coalesceForestCover(map);
-  carveValleys(map, rng);
+
+  // G-Hydro M1+M2 (goals §2.4): S1/S2 topology on the pre-carve field, then S3
+  // carves the real channel network from that tree, then S1/S2 again on the
+  // final field so hydro:check asserts what ships.
+  const hy0 = computeHydrology(map, seed);
+  carveChannels(map, hy0);
+  recomputeRiverDist(map, hy0);
+  map.hydrology = computeHydrology(map, seed);
 
   map.recomputeEdgeMasks();
   map.recomputeShoreDepth();
@@ -425,106 +557,86 @@ function coalesceForestCover(map: HexMap): void {
   p1Stats.forestIsolatesAfter = after.isolates;
 }
 
-/** Walk downhill from wet lowland seeds; store riverDist for later shading. */
-function carveValleys(map: HexMap, rng: () => number): void {
-  const seeds: { lq: number; lr: number; moist: number }[] = [];
-  map.forEach((cell, lq, lr) => {
-    if (isWaterId(cell.terrainId)) return;
-    if (cell.elev < 0.28 && cell.moisture > 0.55) seeds.push({ lq, lr, moist: cell.moisture });
-  });
-  seeds.sort((a, b) => b.moist - a.moist);
-
-  const onPath = new Uint8Array(map.width * map.height);
-  let rivers = 0;
-  const MAX_RIVERS = 6;
-  for (const s of seeds) {
-    if (rivers >= MAX_RIVERS) break;
-    const start = map.index(s.lq, s.lr);
-    if (onPath[start]) continue;
-    const steps = 8 + Math.floor(rng() * 13);
-    let lq = s.lq;
-    let lr = s.lr;
-    let prev = -1;
-    const path: number[] = [];
-    for (let k = 0; k < steps; k++) {
-      const idx = map.index(lq, lr);
-      if (onPath[idx]) break;
-      const cell = map.getLocal(lq, lr);
-      if (isWaterId(cell.terrainId)) break;
-      path.push(idx);
-      onPath[idx] = 1;
-      let bestQ = lq;
-      let bestR = lr;
-      let bestE = 99;
-      let found = false;
-      let hitWater = false;
+/** S3 (goals §2.4): carve the real channel network from the S1/S2 receiver
+ *  tree, replacing the old greedy-walk fake river. Depth is a smoothed
+ *  stream-power static approx (K*sqrt(A)*slope, capped), the smoothed field is
+ *  the "过与 cellTopY 同型平滑核" of the spec, and the bed is forced to descend
+ *  along the tree (mouth processed first) so the carve cannot create sills. */
+function carveChannels(map: HexMap, hy: HydrologyResult): void {
+  const n = map.width * map.height;
+  const channel = new Uint8Array(n);
+  const depth = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const cell = map.getLocal(i % map.width, Math.floor(i / map.width));
+    if (isWaterId(cell.terrainId)) continue;
+    if (hy.area[i]! < CHANNEL_AREA_THRESHOLD) continue;
+    channel[i] = 1;
+    const r = hy.receiver[i]!;
+    const slope = r >= 0 ? Math.max(0.004, hy.filled[i]! - hy.filled[r]!) : 0.02;
+    depth[i] = Math.min(0.12, 0.18 * Math.sqrt(hy.area[i]!) * slope);
+  }
+  // Smooth the depth over the land neighbourhood (cellTopY-shaped 7-point
+  // land mean, 2 passes) — this bevels the banks and keeps any planar
+  // cross-section continuous (H3).
+  let cur = depth;
+  for (let pass = 0; pass < 2; pass++) {
+    const next = new Float32Array(n);
+    map.forEach((cell, lq, lr) => {
+      const i = map.index(lq, lr);
+      if (isWaterId(cell.terrainId)) return;
+      let sum = cur[i]!;
+      let cnt = 1;
       for (const [dq, dr] of AXIAL6) {
         const nq = lq + dq;
         const nr = lr + dr;
         if (!map.inBoundsLocal(nq, nr)) continue;
-        const nIdx = map.index(nq, nr);
-        if (nIdx === prev) continue;
-        const n = map.getLocal(nq, nr);
-        if (isWaterId(n.terrainId)) {
-          hitWater = true;
-          continue;
-        }
-        if (n.elev <= bestE) {
-          bestE = n.elev;
-          bestQ = nq;
-          bestR = nr;
-          found = true;
-        }
+        const nb = map.getLocal(nq, nr);
+        if (isWaterId(nb.terrainId)) continue;
+        sum += cur[nr * map.width + nq]!;
+        cnt++;
       }
-      if (!found) {
-        if (hitWater) break;
-        break;
-      }
-      prev = idx;
-      lq = bestQ;
-      lr = bestR;
+      next[i] = sum / cnt;
+    });
+    cur = next;
+  }
+  // Mouth-first (descending area) so the downstream bed is final when an
+  // upstream cell is written: bed never rises along the tree.
+  const order: number[] = [];
+  for (let i = 0; i < n; i++) if (channel[i]) order.push(i);
+  order.sort((a, b) => hy.area[b]! - hy.area[a]!);
+  for (const i of order) {
+    const cell = map.getLocal(i % map.width, Math.floor(i / map.width));
+    let e = cell.elev - cur[i]!;
+    const r = hy.receiver[i]!;
+    if (r >= 0 && channel[r]) {
+      const rc = map.getLocal(r % map.width, Math.floor(r / map.width));
+      e = Math.max(e, rc.elev + 0.004);
     }
-    if (path.length < 3) {
-      for (const idx of path) onPath[idx] = 0;
+    cell.elev = Math.max(0.05, e);
+  }
+}
+
+/** riverDist/Riverbank from the real channel (same 6-step BFS normalisation
+ *  the shader's river-proximity band has always consumed). */
+function recomputeRiverDist(map: HexMap, hy: HydrologyResult): void {
+  const n = map.width * map.height;
+  const dist = new Int16Array(n).fill(-1);
+  const queue: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const cell = map.getLocal(i % map.width, Math.floor(i / map.width));
+    if (isWaterId(cell.terrainId)) {
+      cell.riverDist = 0;
       continue;
     }
-    rivers++;
-    p1Stats.riverPathCells += path.length;
-    for (const idx of path) {
-      const lr0 = Math.floor(idx / map.width);
-      const lq0 = idx - lr0 * map.width;
-      const c = map.getLocal(lq0, lr0);
-      c.elev = Math.max(0.02, c.elev * 0.38);
-      c.featureId = Feature.Riverbank;
-      c.riverDist = 0;
+    if (hy.area[i]! >= CHANNEL_AREA_THRESHOLD) {
+      dist[i] = 0;
+      cell.riverDist = 0;
+      cell.featureId = Feature.Riverbank;
+      queue.push(i);
+    } else {
+      cell.riverDist = 1;
     }
   }
-
-  map.forEach((cell, lq, lr) => {
-    if (isWaterId(cell.terrainId) || onPath[map.index(lq, lr)]) return;
-    let beside = false;
-    for (const [dq, dr] of AXIAL6) {
-      const nq = lq + dq;
-      const nr = lr + dr;
-      if (!map.inBoundsLocal(nq, nr)) continue;
-      if (onPath[map.index(nq, nr)]) {
-        beside = true;
-        break;
-      }
-    }
-    if (beside) cell.elev = Math.max(0.02, cell.elev * 0.62);
-  });
-
-  const dist = new Int16Array(map.width * map.height).fill(-1);
-  const queue: number[] = [];
-  map.forEach((cell, lq, lr) => {
-    const idx = map.index(lq, lr);
-    if (onPath[idx]) {
-      dist[idx] = 0;
-      queue.push(idx);
-      cell.riverDist = 0;
-    }
-  });
   const MAX_RIVER = 6;
   for (let head = 0; head < queue.length; head++) {
     const idx = queue[head]!;
@@ -536,12 +648,12 @@ function carveValleys(map: HexMap, rng: () => number): void {
       const nq = lq + dq!;
       const nr = lr + dr!;
       if (!map.inBoundsLocal(nq, nr)) continue;
-      const nIdx = map.index(nq, nr);
-      if (dist[nIdx] !== -1) continue;
-      const n = map.getLocal(nq, nr);
-      if (isWaterId(n.terrainId)) continue;
-      dist[nIdx] = d + 1;
-      queue.push(nIdx);
+      const j = nr * map.width + nq;
+      if (dist[j] !== -1) continue;
+      const nb = map.getLocal(nq, nr);
+      if (isWaterId(nb.terrainId)) continue;
+      dist[j] = d + 1;
+      queue.push(j);
     }
   }
   map.forEach((cell, lq, lr) => {
@@ -550,6 +662,6 @@ function carveValleys(map: HexMap, rng: () => number): void {
       return;
     }
     const d = dist[map.index(lq, lr)]!;
-    cell.riverDist = d < 0 ? 1 : Math.min(d, MAX_RIVER) / MAX_RIVER;
+    if (d > 0) cell.riverDist = Math.min(d, MAX_RIVER) / MAX_RIVER;
   });
 }

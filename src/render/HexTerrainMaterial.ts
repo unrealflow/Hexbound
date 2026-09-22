@@ -12,6 +12,10 @@ import vertSrc from './shaders/hexTerrain.vert.glsl?raw';
 import fragSrc from './shaders/hexTerrain.frag.glsl?raw';
 import noiseSrc from './shaders/noise.glsl?raw';
 import { HEX_SIZE } from '../hex/coords';
+import { bakeLightmap } from '../hex/terrainContinuity';
+
+/** Surface-to-sun direction, shared by the sky, the material and the lightmap bake. */
+export const SUN_DIR = new Vector3(0.62, 0.72, 0.3).normalize();
 import type { HexMap } from '../hex/HexMap';
 
 const SHADER_NAME = 'hexTerrain';
@@ -86,6 +90,12 @@ export function createHexTerrainMaterial(scene: Scene): HexTerrainMaterial {
         'uMapSize',
         'uHexSize',
         'uDbgField',
+        'uShadowK',
+        'uAOK',
+        'uShadowCool',
+        'uExposure',
+        'uSaturation',
+        'uSplitWarm',
       ],
       samplers: [
         'uNoiseTex',
@@ -96,6 +106,7 @@ export function createHexTerrainMaterial(scene: Scene): HexTerrainMaterial {
         'uCanopyTex',
         'uMapTex0',
         'uMapTex1',
+        'uMapTex2',
       ],
     },
   );
@@ -108,7 +119,7 @@ export function createHexTerrainMaterial(scene: Scene): HexTerrainMaterial {
   mat.setFloat('uShowWireHint', 0);
   mat.setFloat('uUseDetailTex', 1);
   // Surface-to-sun direction (matches scene light)
-  mat.setVector3('uSunDir', new Vector3(0.62, 0.72, 0.3).normalize());
+  mat.setVector3('uSunDir', SUN_DIR.clone());
   mat.setVector3('uCamPos', new Vector3(0, 26, 34));
   mat.setVector3('uSkyColor', new Vector3(0.32, 0.52, 0.88));
   mat.setVector3('uHorizonColor', new Vector3(0.72, 0.78, 0.86));
@@ -126,6 +137,15 @@ export function createHexTerrainMaterial(scene: Scene): HexTerrainMaterial {
   mat.setFloat('uHexSize', HEX_SIZE);
   // Field view for diagnosis; 0 is the normal shading path.
   mat.setFloat('uDbgField', 0);
+  // P2 lightmap (look-workflow): sun-visibility gate, AO strength, cool tint.
+  mat.setFloat('uShadowK', 0.95);
+  mat.setFloat('uAOK', 0.75);
+  mat.setFloat('uShadowCool', 0.5);
+  // P3 grade defaults reproduce the pre-sweep look (sat 1.16 lived post-tonemap
+  // before; exposure 1.0/0.96 and the old warm split net out to ~1.0/0.5 here).
+  mat.setFloat('uExposure', 1.04);
+  mat.setFloat('uSaturation', 1.22);
+  mat.setFloat('uSplitWarm', 0.9);
 
   return mat;
 }
@@ -154,16 +174,19 @@ export function bindMapData(
   mat: HexTerrainMaterial,
   scene: Scene,
   map: HexMap,
-): { tex0: RawTexture; tex1: RawTexture } {
+): { tex0: RawTexture; tex1: RawTexture; tex2: RawTexture } {
   const { tex0, tex1, width, height } = map.packMapTextures(MAP_SUB);
+  const light = bakeLightmap(map, MAP_SUB, SUN_DIR);
   const t0 = createMapDataTex(scene, tex0, width, height, 'uMapTex0');
   const t1 = createMapDataTex(scene, tex1, width, height, 'uMapTex1');
+  const t2 = createMapDataTex(scene, light.data, light.width, light.height, 'uMapTex2');
   mat.setTexture('uMapTex0', t0);
   mat.setTexture('uMapTex1', t1);
+  mat.setTexture('uMapTex2', t2);
   mat.setVector2('uMapOrigin', new Vector2(map.originQ, map.originR));
   mat.setVector2('uMapSize', new Vector2(map.width, map.height));
   mat.setFloat('uHexSize', HEX_SIZE);
-  return { tex0: t0, tex1: t1 };
+  return { tex0: t0, tex1: t1, tex2: t2 };
 }
 
 export function updateTerrainMaterial(

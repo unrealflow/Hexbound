@@ -16,7 +16,7 @@ Judge **canvas** dumps (`*-canvas.png`), not the full-page PNG (HUD/chrome).
 | File | Camera | Acceptance items |
 |---|---|---|
 | `01-overview-default-canvas.png` | default seed, ortho ~18 | P0-4 mosaic, P0-8 default rims, P1-1 ridge at range, P1-7 haze |
-| `02-zoomed-cliffs-canvas.png` | zoomed relief | P0-2 skirts, P1-1 ridge, P1-2 snow, P1-3 cliff vs ramp |
+| `02-zoomed-cliffs-canvas.png` | zoomed relief | P1-1 ridge, P1-2 snow, P1-3 continuous steep-slope shading (P0-2 skirt wording predates the 2026-09-19 wall retirement) |
 | `03-panned-coast-canvas.png` | coastal pan | P0-5 water rings, P0-6 beach width, P1-4 shelf + foam |
 | `04-wide-biomes-canvas.png` | pulled back | P0-4/P0-7, P1-5 valley, P1-6 forest patches |
 | `05-reseed-diversity-canvas.png` | random seed | P1-8 seam + landmark still present after reseed |

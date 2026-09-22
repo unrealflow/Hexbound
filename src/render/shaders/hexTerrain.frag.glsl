@@ -35,9 +35,21 @@ uniform sampler2D uWaterNormalTex;
 uniform sampler2D uCanopyTex;
 uniform sampler2D uMapTex0;
 uniform sampler2D uMapTex1;
+uniform sampler2D uMapTex2;
 uniform vec2 uMapOrigin;
 uniform vec2 uMapSize;
 uniform float uHexSize;
+// P2 lightmap (look-workflow): sun-visibility gate strength, baked-AO
+// strength, and how far shadows tint toward cool sky light.
+uniform float uShadowK;
+uniform float uAOK;
+uniform float uShadowCool;
+// P3 grade (look-workflow): applied BEFORE tonemap — exposure, saturation,
+// warm-highlight/cool-shadow split. Narkowicz already sits in tonemapFilmic;
+// what was missing is the grade in front of it.
+uniform float uExposure;
+uniform float uSaturation;
+uniform float uSplitWarm;
 
 float gWaterW;
 float gForestW;
@@ -48,6 +60,9 @@ float gSandW;
 float gTundraW;
 float gMtnW;
 float gFidW;
+/** P2 lightmap: baked sun visibility (ray-marched) and horizon AO. */
+float gSunVis = 1.0;
+float gBakeAO = 1.0;
 /** Shore SDF water coverage — main() flattens normals / kills shelf needles with this. */
 float gWaterSurf = 0.0;
 /** Relief-perturbed normal built from the continuous world-xz displacement
@@ -168,6 +183,12 @@ vec3 terrainAlbedo(float tid, float fid, float elev, float moist, vec3 wp, vec3 
   vec2 uv = (axialPw - uMapOrigin + 0.5) / max(uMapSize, vec2(1.0));
   vec4 t0 = texture2D(uMapTex0, uv);
   vec4 t1 = texture2D(uMapTex1, uv);
+  // The lightmap is positional: sample it UNWARPED so shadows and AO track
+  // world positions instead of riding the biome-outline warp.
+  vec2 uvL = (axialP - uMapOrigin + 0.5) / max(uMapSize, vec2(1.0));
+  vec4 t2 = texture2D(uMapTex2, uvL);
+  gSunVis = t2.r;
+  gBakeAO = t2.g;
 
   float tidS = t0.r * 8.0;
   float fidW = t0.g * 8.0;
@@ -527,13 +548,17 @@ void main() {
   // Land diffuse (form). Water uses a calm, almost-lambert fill — no slope AO
   // stripes from residual relief.
   float wSurf = smoothstep(0.12, 0.50, gWaterSurf);
-  vec3 litLand = albedo * (hemi * 0.26 + sunCol * ndl * 1.72 + sunCol * wrap * 0.10);
+  // Baked sun gate: shadowed ground loses its direct sun but keeps the warm
+  // wrap fill at reduced strength, so the terminator stays soft.
+  float sunGate = 1.0 - uShadowK * (1.0 - gSunVis);
+  vec3 litLand = albedo * (hemi * 0.26 + sunCol * ndl * 1.72 * sunGate + sunCol * wrap * 0.10 * mix(0.55, 1.0, gSunVis));
   litLand += albedo * sunCol * back * mix(0.05, 0.16, isCanopy);
   if (canopyT > 0.0) {
     vec3 transCol = mix(vec3(0.30, 0.54, 0.14), vec3(0.20, 0.46, 0.12), smoothstep(1.2, 1.8, gFidW));
     litLand += transCol * sunCol * canopyT * 0.45;
   }
   float ao = 1.0 - smoothstep(0.0, 0.9, gElevW) * 0.14 - gReliefW * 0.10;
+  ao *= 1.0 - uAOK * (1.0 - gBakeAO);
   ao *= mix(1.0, canopyOcc * 0.85 + 0.15, isCanopy);
   ao *= mix(0.66, 1.0, ndl * 0.5 + 0.5);
   float slopeShade = mix(0.62, 1.0, wrap);
@@ -542,6 +567,9 @@ void main() {
   litLand = max(litLand, albedo * shTint);
   float cliffContact = (1.0 - clamp(n.y, 0.0, 1.0)) * gReliefW;
   litLand *= mix(1.0, 0.84, cliffContact * 0.55);
+  // Shadowed faces read cool (sky fill dominates), sunlit faces stay warm.
+  float shW = (1.0 - gSunVis) * uShadowCool;
+  litLand = mix(litLand, litLand * vec3(0.80, 0.90, 1.22), shW);
 
   // Calm water fill (HK glass shelf): stable ndl from flat n, no AO grit.
   float ndlW = max(dot(vec3(0.0, 1.0, 0.0), L), 0.0);

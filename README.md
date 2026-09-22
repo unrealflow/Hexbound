@@ -23,7 +23,10 @@ npm run dev
 ```bash
 npm run build
 npm run preview
+npm run verify    # 门禁套件（corner/hole/disp:weld/pick 需要 dev server 先在 5173 运行）
 ```
+
+`verify` = glsl → tsc → crack → profile → **hydro**（H1/H5 水文一致性）→ corner → hole → disp:weld → pick，全绿才算不回退。
 
 ## 操作
 
@@ -37,17 +40,17 @@ npm run preview
 - **允许**：`public/tex/` 合成平铺噪声与细节（`sampler2D`）
 - **禁止作为主外观**：照片地表 albedo atlas；树/石 `.glb` 装饰（除非后续明确需要）
 - `refs/*.jpg` 只用于美术对照，**不会**被 Shader 采样
-- 几何为程序化六边形棱柱 Chunk；邻格高程混合 + 悬崖保留
+- 几何为程序化六边形 Chunk；邻格高程**全焊接为连续剖面**（无崖墙——陡峭由连续陡坡 + 坡度驱动岩雪着色表达，见 `docs/design/2026-09-19-hexbound-goals-and-refs.md`）
 
 ## 当前视觉切片
 
 | 特性 | 状态 |
 |------|------|
 | 斜视正交相机 + 程序化天空/太阳盘 | ✅ |
-| 邻格高程混合 + FBM 微位移 / 悬崖 boost | ✅ |
+| 邻格高程焊接 + FBM 微位移 / 高程 boost | ✅ |
 | Quintic `noised` / `fbmdX`（Rainforest 风格） | ✅ |
 | 林冠 soft-ellipsoid 场 + 近景树干 / 远景密度 LOD | ✅ |
-| 山体 ridged 反照率 / 雪线 / 侧壁 strata | ✅ |
+| 山体 ridged 反照率 / 雪线 / 陡坡岩层 strata | ✅ |
 | 水面深度色 / 岸沫 / 动画法线贴图 / 太阳高光 | ✅ |
 | 彩色消光距离雾 | ✅ |
 | 平铺细节贴图（草/岩/沙/水/林冠） | ✅ |

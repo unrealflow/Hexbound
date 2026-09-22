@@ -27,4 +27,6 @@ dist-ssr
 #   docs/shots/*.png  -> regenerate with `npm run shots` / `npm run shots:iter`
 #   refs/*.jpg        -> download with `npm run refs:fetch` (see refs/SOURCES.md)
 docs/shots/*.png
+docs/shots/_sweep-*/
+docs/shots/_look-*
 refs/*.jpg

@@ -10,6 +10,7 @@ import {
   weldCornerScalar,
   avg7,
   displaceLandY,
+  dispWeight,
 } from '../src/hex/terrainContinuity.ts';
 
 const map = generateMap({ seed: 20260916, width: 40, height: 32 });
@@ -24,7 +25,7 @@ map.forEach((cell, lq, lr) => {
   const { x: cxw, z: czw } = axialToWorld(cell.q, cell.r, HEX_SIZE);
   const elevC = avg7(map, lq, lr, rawElev);
   const mC = avg7(map, lq, lr, rawMountainW);
-  const yc = yTopFlat + 0.015 + displaceLandY(cxw, czw, elevC, mC, 0, true);
+  const yc = yTopFlat + 0.015 + displaceLandY(cxw, czw, elevC, mC, dispWeight(map, cxw, czw), true);
   ys.push(yc);
   peak = Math.max(peak, yc);
   if (mC > 0.3) mountainYs.push(yc);
@@ -33,7 +34,7 @@ map.forEach((cell, lq, lr) => {
     const y = cornerTopY(map, lq, lr, i, yTopFlat, isWater);
     const eW = weldCornerScalar(map, lq, lr, i, rawElev);
     const mW = weldCornerScalar(map, lq, lr, i, rawMountainW);
-    const yv = y + displaceLandY(cxw + c.x, czw + c.z, eW, mW, 0, true);
+    const yv = y + displaceLandY(cxw + c.x, czw + c.z, eW, mW, dispWeight(map, cxw + c.x, czw + c.z), true);
     ys.push(yv);
     peak = Math.max(peak, yv);
     if (mW > 0.3) mountainYs.push(yv);

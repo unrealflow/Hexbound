@@ -507,3 +507,107 @@ function smoothstep(e0: number, e1: number, x: number): number {
   const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
   return t * t * (3 - 2 * t);
 }
+
+/**
+ * Bake a positional lightmap (look-workflow P2) at `sub` x `sub` texels per
+ * cell, texel positions identical to bakeRGBA's: R = sun visibility, G = baked
+ * ambient occlusion, B = displaced world height (normalised over ELEV_SCALE),
+ * A = 1. The height source is heightAt('shader') — the same welded +
+ * displaced field the mesh draws — so shadows and AO land on the visible
+ * surface, not on the raw cell elev. Shadow marching and AO read a
+ * pre-sampled height grid (one heightAt call per texel, bilinear in between),
+ * which keeps the bake at ~25k heightAt calls instead of ~1.2M.
+ */
+export function bakeLightmap(
+  map: HexMap,
+  sub: number,
+  sunDir: { x: number; y: number; z: number },
+): { data: Uint8Array; width: number; height: number } {
+  const w = map.width * sub;
+  const h = map.height * sub;
+  const grid = new Float32Array(w * h);
+  for (let lr = 0; lr < map.height; lr++) {
+    for (let lq = 0; lq < map.width; lq++) {
+      for (let j = 0; j < sub; j++) {
+        for (let i = 0; i < sub; i++) {
+          const p = axialToWorld(
+            map.originQ + lq - 0.5 + (i + 0.5) / sub,
+            map.originR + lr - 0.5 + (j + 0.5) / sub,
+          );
+          grid[(lr * sub + j) * w + (lq * sub + i)] = heightAt(map, p.x, p.z, 'shader');
+        }
+      }
+    }
+  }
+  // World -> grid coords: the texel lattice is regular in axial space, so
+  // gq = (q - (originQ - 0.5)) * sub - 0.5 maps a texel centre to its index.
+  const sampleH = (x: number, z: number): number => {
+    const f = worldToAxialFrac(x, z, HEX_SIZE);
+    const gq = (f.q - (map.originQ - 0.5)) * sub - 0.5;
+    const gr = (f.r - (map.originR - 0.5)) * sub - 0.5;
+    const x0 = Math.floor(gq);
+    const y0 = Math.floor(gr);
+    const tx = gq - x0;
+    const ty = gr - y0;
+    const cx = (v: number) => Math.min(w - 1, Math.max(0, v));
+    const cy = (v: number) => Math.min(h - 1, Math.max(0, v));
+    const a = grid[cy(y0) * w + cx(x0)]!;
+    const b = grid[cy(y0) * w + cx(x0 + 1)]!;
+    const c = grid[cy(y0 + 1) * w + cx(x0)]!;
+    const d = grid[cy(y0 + 1) * w + cx(x0 + 1)]!;
+    return (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty;
+  };
+
+  const lenXZ = Math.hypot(sunDir.x, sunDir.z) || 1;
+  const sx = sunDir.x / lenXZ;
+  const sz = sunDir.z / lenXZ;
+  const ySlope = sunDir.y / lenXZ;
+  const STEP = 0.6;
+  const MAX_T = 22;
+  const AO_DIRS = 8;
+  const AO_RADII = [1.1, 2.3, 4.6];
+
+  const data = new Uint8Array(w * h * 4);
+  for (let lr = 0; lr < map.height; lr++) {
+    for (let lq = 0; lq < map.width; lq++) {
+      for (let j = 0; j < sub; j++) {
+        for (let i = 0; i < sub; i++) {
+          const p = axialToWorld(
+            map.originQ + lq - 0.5 + (i + 0.5) / sub,
+            map.originR + lr - 0.5 + (j + 0.5) / sub,
+          );
+          const h0 = grid[(lr * sub + j) * w + (lq * sub + i)]!;
+
+          // Sun visibility: march toward the sun, track the worst overshoot.
+          let overshoot = 0;
+          for (let t = STEP; t <= MAX_T && overshoot < 0.3; t += STEP) {
+            const terrain = sampleH(p.x + sx * t, p.z + sz * t);
+            const rayY = h0 + ySlope * t;
+            if (terrain > rayY) overshoot = Math.max(overshoot, terrain - rayY);
+          }
+          const vis = 1 - smoothstep(0.02, 0.3, overshoot);
+
+          // Horizon occlusion over 8 directions x 3 radii.
+          let occ = 0;
+          for (let k = 0; k < AO_DIRS; k++) {
+            const ang = (k / AO_DIRS) * Math.PI * 2;
+            const ox = Math.cos(ang);
+            const oz = Math.sin(ang);
+            for (const r of AO_RADII) {
+              const dh = sampleH(p.x + ox * r, p.z + oz * r) - h0;
+              if (dh > 0) occ += dh / r;
+            }
+          }
+          const ao = Math.exp(-0.14 * occ);
+
+          const o = ((lr * sub + j) * w + (lq * sub + i)) * 4;
+          data[o] = Math.round(vis * 255);
+          data[o + 1] = Math.round(Math.min(1, Math.max(0, ao)) * 255);
+          data[o + 2] = Math.round(Math.min(1, Math.max(0, h0 / ELEV_SCALE)) * 255);
+          data[o + 3] = 255;
+        }
+      }
+    }
+  }
+  return { data, width: w, height: h };
+}

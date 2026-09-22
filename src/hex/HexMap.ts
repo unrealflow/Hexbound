@@ -1,6 +1,8 @@
 /** Logical hex cell data for exploration-layer terrain validation. */
 
 import { AXIAL_DIRS, HEX_SIZE, axialToWorld, hexCornerOffset } from './coords';
+import { detailBand } from './fbm';
+import type { HydrologyResult } from './hydrology';
 
 export const Terrain = {
   Plains: 0,
@@ -141,6 +143,11 @@ function fractalUpsampleForest(base: number, wx: number, wz: number): number {
 }
 
 
+function smoothstep(lo: number, hi: number, x: number): number {
+  const t = Math.min(1, Math.max(0, (x - lo) / (hi - lo)));
+  return t * t * (3 - 2 * t);
+}
+
 export class HexMap {
   readonly width: number;
   readonly height: number;
@@ -148,6 +155,9 @@ export class HexMap {
   readonly originQ: number;
   readonly originR: number;
   private cells: HexCell[];
+  /** Hydrology data layer (goals §2.4 S1/S2), filled by generateMap. Null for
+   *  hand-built maps. Pure data: geometry/picking never read it. */
+  hydrology: HydrologyResult | null = null;
 
   constructor(width: number, height: number, originQ = 0, originR = 0) {
     this.width = width;
@@ -391,8 +401,25 @@ export class HexMap {
    * its neighbours the result has no per-cell plateau for the shader to draw as a
    * hexagon. `{ dist: true }` instead stores the signed shore distance, positive
    * offshore on a scale that saturates SHORE_RANGE world units out.
+   *
+   * A channel with `detail` also gets a zero-mean sub-cell band (src/hex/fbm.ts)
+   * added AFTER the kernel accumulation: the kernel only interpolates the one
+   * value per cell it is given, so the low band it builds is spectrumless above
+   * the cell frequency and every iso-contour it draws follows the hex lattice.
+   * `mul` scales the low band by (1 + amp * band) — self-gating, so a field that
+   * is 0 off-forest grows no phantom forest; `add` appends amp * band and needs
+   * `gateCh` (blended terrainId/8 * 8) to fade the band out over water.
    */
-  private bakeRGBA(spec: { ch?: number; r?: number; dist?: boolean; fractalForest?: boolean }[], sub: number): {
+  private bakeRGBA(
+    spec: {
+      ch?: number;
+      r?: number;
+      dist?: boolean;
+      fractalForest?: boolean;
+      detail?: { amp: number; freq: number; seed: number; mode: 'mul' | 'add'; gateCh?: number; gateFrom?: number };
+    }[],
+    sub: number,
+  ): {
     data: Uint8Array;
     width: number;
     height: number;
@@ -448,12 +475,25 @@ export class HexMap {
             }
             const o = ((lr * sub + j) * w + lq * sub + i) * 4;
             for (let k = 0; k < spec.length; k++) {
-              if (spec[k].dist) {
+              const sp = spec[k]!;
+              if (sp.dist) {
                 const sd = HexMap.shoreDistance(segs, p.x, p.z) / SHORE_RANGE;
                 out[o + k] = toU8(0.5 + 0.5 * Math.max(-1, Math.min(1, sd)));
               } else {
-                let v = wSum[k] > 0 ? acc[k] / wSum[k] : 0;
-                if (spec[k].fractalForest) v = fractalUpsampleForest(v, p.x, p.z);
+                let v = wSum[k]! > 0 ? acc[k]! / wSum[k]! : 0;
+                if (sp.fractalForest) v = fractalUpsampleForest(v, p.x, p.z);
+                const d = sp.detail;
+                if (d && wSum[k]! > 0) {
+                  let gate = 1;
+                  if (d.gateCh !== undefined && wSum[d.gateCh]! > 0) {
+                    // Blend of terrainId/8 * 8: rises to 6+ over water, so the band
+                    // fades out across the shore instead of speckling the sea.
+                    const g = (acc[d.gateCh]! / wSum[d.gateCh]!) * 8;
+                    gate = 1 - smoothstep(d.gateFrom ?? 5.7, (d.gateFrom ?? 5.7) + 0.3, g);
+                  }
+                  const band = detailBand(p.x, p.z, d.seed, d.freq);
+                  v = d.mode === 'mul' ? v * (1 + d.amp * gate * band) : v + d.amp * gate * band;
+                }
                 out[o + k] = toU8(v);
               }
             }
@@ -479,6 +519,15 @@ export class HexMap {
    * luminance went from +0.02 to +0.13): the fine level varies inside a cell
    * while the coarse one does not, so their difference is itself cell aligned and
    * boosting it re-amplifies exactly the structure the pre-filter removed.
+   *
+   * elev, moisture and forestCover additionally carry a zero-mean sub-cell
+   * detail band (see bakeRGBA / src/hex/fbm.ts). Unlike that failed boost, the
+   * band is independent noise added after the kernel, not a difference of two
+   * levels of the same fields, so it carries no cell-aligned structure — its
+   * job is to give the forest and biome iso-contours information below the cell
+   * frequency, which no amount of filtering can invent. forestCover is
+   * multiplicative (self-gating), elev/moisture additive and gated off water
+   * through the blended terrainId channel.
    */
   packMapTextures(sub = 4): { tex0: Uint8Array; tex1: Uint8Array; width: number; height: number } {
     const A = AREA_RADIUS_CELLS;
@@ -488,8 +537,8 @@ export class HexMap {
       [
         { ch: 0, r: A },
         { ch: 1, r: A },
-        { ch: 2, r: A },
-        { ch: 3, r: A },
+        { ch: 2, r: A, detail: { amp: 0.022, freq: 0.85, seed: 303, mode: 'add', gateCh: 0 } },
+        { ch: 3, r: A, detail: { amp: 0.06, freq: 0.85, seed: 202, mode: 'add', gateCh: 0 } },
       ],
       sub,
     );

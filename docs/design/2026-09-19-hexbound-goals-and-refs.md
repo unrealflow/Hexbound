@@ -61,12 +61,14 @@ Hexbound 图形验证期的**几何/无缝/连续性硬问题已基本钉死**�
 | G2 | 子格源对齐 | 林缘 / 关键生物群系边界在上视 `field-view` 中不再呈明显六边等值线（方向直方图无 ±30° 尖峰主导） |
 | G3 | 真河道切片 | 至少 1 条贯穿河谷在概览机位可读为「水面带 + 河岸」，复用岸 SDF 水色栈 |
 | G4 | 高度真源 | 雪线 / 拾取高度 /（可选）坡度掩模共享同一烘焙后高度场，或文档明确「位移仅微细节、不改语义高」 |
-| G5 | 视觉对标 | 官方 `01–05` 相对 `VISUAL_TARGETS.md`：山脊连续、海岸浅→深、林成团、无马赛克/裂缝；对照 `refs/` 做旁注 diff |
+| G5 | 视觉对标 | 不再是「旁注 diff」。按 look-workflow：锁定机位对；AI 每轮 0–3 分、人拍里程碑；**P2 lightmap 与 P1 并行或先行**；色彩先改 `biomePalette`（P3a）而非再拧分级；森林完成定义是合成 billboard（P5-B），着色器冠面不收敛。G5 上限是「可读 4X 地标」不是 Civ 最终帧。`verify` 全绿不是 G5 PASS |
 | G6（可选） | 玩法最小闭环 | 选格 → 合法邻格高亮 → 移动消耗（设计文档 v0.5 探索层），不阻塞 G1–G5 |
+
+G5 工作流与差距 backlog 的单一入口：`docs/design/2026-09-19-hexbound-look-workflow.md`（排序表同步写在 `docs/VISUAL_TARGETS.md`「Look gap backlog」）。
 
 ### 2.2 明确非目标（本阶段不做）
 
-- 整仓照片 atlas / 树石 GLB 堆场景  
+- 整仓照片 atlas / 树石 GLB 堆场景（合成 cross-quad 树冠 billboard 见 look-workflow P5-B，允许）  
 - 恢复垂直断崖墙（违反连续性规格）  
 - 全图 Geometry Clipmap / 行星级流式（地图仍是 40×32 验证规模）  
 - WFC 整图贴片拼装替代噪声场（可作为对照实验，不替换主路径）
@@ -179,6 +181,7 @@ S1–S2 是纯数据层，可与 B（子格源数据）**并行或先行**——
 3. `docs/design/impl-progress.md` — 全部门禁数字与失效模式  
 4. `docs/VISUAL_TARGETS.md` + `refs/SOURCES.md` — 观感对标与参考图来源  
 5. `docs/shadertoy-refs/TECHNIQUES.md` — 允许移植 / 禁止整段 raymarch 的边界  
+6. `docs/design/2026-09-19-hexbound-look-workflow.md` — G5 观感对标工作流（锁定机位、rubric、约束决策）
 
 ### 3.6 水文、河网与河道水体（G-Hydro / §2.4 的支撑文献，已检索核实）
 
@@ -198,6 +201,19 @@ S1–S2 是纯数据层，可与 B（子格源数据）**并行或先行**——
 扩展阅读（未逐条核实版本）：Musgrave/Kolb/Mace 1989 eroded fractal terrains
 （SIGGRAPH，水力/热力侵蚀奠基）；Cook & DeRose 2005 Wavelet Noise（B 步子格
 上采样的抗混叠噪声替换候选）。CDLOD / clipmaps 已列 §3.4。
+
+### 3.7 观感如何达成（光照 / 分级 / 植被 / 风格化）— 2026-09-19 补
+
+§3.1–3.6 覆盖算法；下面补的是参考图观感贡献最大、原先缺的工程锚。Firaxis 地形美术 **没有**检索到可钉死的单场 GDC 标题，不编造。细则与排期见 look-workflow §8。
+
+| 参考 | 链接 | 映射到 |
+|------|------|--------|
+| Narkowicz (2016) — ACES filmic tone mapping curve | https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/ | **曲线已在** `tonemapFilmic`。片元 604–613 已有 sat 1.22 / 对比 0.58 / split-tone。色彩先改 `biomePalette`（P3a）；P3b 才动这条 grade，不要再接一条 ACES |
+| Babylon.js — Shadows / ShadowGenerator | https://doc.babylonjs.com/features/featuresDeepDive/lights/shadows | P2 **备选**。自定义 `ShaderMaterial` 不会自动吃场景灯影，接上必须在片元里采样 |
+| Amplitude — HUMANKIND Feature Focus 02: Reimagining Terrain | https://community.amplitude-studios.com/amplitude-studios/humankind/blogs/722-humankind-feature-focus-02-reimagining-terrain | 平原 / 丘 / 山链必须一眼可分；悬崖在他们那里是玩法障碍，在我们这里被连续性规格降权 |
+| Unite Now 2020 — Behind the Game: Humankind（GPU 实例化植被、纹理里编码山形） | https://www.youtube.com/watch?v=Pe8hHHGn_G0 | 本阶段不搬实例化树；「形体写进场、每帧生成几何」与我们的高度场路线同族 |
+| Aurelien Rantet — Humankind Art Direction | https://aurel.artstation.com/projects/ZGr8rR | 风格化层理/台地的画法教材，不作为垂直墙验收 |
+| Civ6 内部 docs 摘录 — Terrain Bounce Lighting / offset blending | https://github.com/Wild-W/Civ-6-Documentation/blob/main/Civ6Docs.md | 借「弹射光把物体坐实地表」给 P2 谷亮；**不借**照片 blend atlas |
 
 ---
 

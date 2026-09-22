@@ -31,6 +31,7 @@ export interface ChunkMeshes {
   material: HexTerrainMaterial;
   mapTex0: RawTexture;
   mapTex1: RawTexture;
+  mapTex2: RawTexture;
   dispose: () => void;
 }
 
@@ -48,7 +49,7 @@ export interface ChunkMeshes {
  */
 export function meshMap(scene: Scene, map: HexMap): ChunkMeshes {
   const material = createHexTerrainMaterial(scene);
-  const { tex0, tex1 } = bindMapData(material, scene, map);
+  const { tex0, tex1, tex2 } = bindMapData(material, scene, map);
   const meshes: Mesh[] = [];
 
   const chunksX = Math.ceil(map.width / CHUNK_SIZE);
@@ -66,10 +67,12 @@ export function meshMap(scene: Scene, map: HexMap): ChunkMeshes {
     material,
     mapTex0: tex0,
     mapTex1: tex1,
+    mapTex2: tex2,
     dispose: () => {
       for (const m of meshes) m.dispose();
       tex0.dispose();
       tex1.dispose();
+      tex2.dispose();
       material.dispose();
     },
   };

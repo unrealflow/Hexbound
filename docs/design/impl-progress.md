@@ -1,5 +1,9 @@
 # 实现进度
 
+> **阅读注（2026-09-19）**：本文件按时间顺序追加。「断崖机制退役」条目之前的段落描述
+> 已退役的崖墙/侧壁机制（walls=38、CLIFF_DROP 分裂、wallLift 等），口径以退役条目与
+> `docs/design/2026-09-19-hexbound-goals-and-refs.md` 为准；历史条目保留原貌不改。
+
 ## P0-数据层 (2026-09-17)
 
 改动：`src/hex/HexMap.ts`、`src/hex/mapgen.ts`。
@@ -334,3 +338,43 @@ Reviewer 第四轮（雾）提问发出后 worker 离线，导出文件里只有
 命令：`check-glsl` ES1+ES3 OK；`tsc` 0；`npm run p0:check` 六项全 OK；`npm run pick:check` OK；`npm run shots` 重出官方 5 图（`_weld1-*` 为特写证据）。
 论文：§1.1 增补连续性规格；§5.1–5.3 重写为全焊接（保留机制退役的过程记录）；§6.3 改写为"连续剖面的陡坡着色"；§7 表更新并新增 profile:check；附录 A/B 同步。
 遗留说明：`scripts/_relief-probe.ts`、`_weld-probe.ts`、`_keep-probe.mjs`、`_tri-probe.mjs`、`_hole-focus.mjs` 引用旧符号（临时诊断脚本，未入 npm scripts，不阻塞门禁）。
+
+## 五方向探索汇总与首批改进落地（2026-09-19 晚）
+
+5 个只读探索代理并行覆盖 goals §2.3 A–E；汇总见 `docs/design/2026-09-19-direction-explorations.md`。本轮落地四项：
+
+1. **B 试点·子格细节带**：新增 `src/hex/fbm.ts`（旋转 FBM + 域扭曲，常数与 `noise.glsl` 同源）；`bakeRGBA` spec 支持 `detail`（**核累加之后**叠加零均值高频带）：forestCover 乘性 amp 0.15（自门控）、moisture 0.06 / elev 0.022 加性 + terrainId 门控（水上归零）。通道布局/MAP_SUB/几何路径不动。
+   指标：field-view 模式 1（forestW 数据场）horizontal 占比 **0.905→0.660**（能量扩展到垂直/±30°）；orient-metric pm30 0.246→0.248（无新伪影）；`verify` 全绿且几何/拾取数字逐位不变（walls=0、profile 0.00858、pick 158/181、fieldAboveMesh 0.924）。官方 5 图重出无回退。
+2. **C-M1·水文数据层**：新增 `src/hex/hydrology.ts`——S1 Priority-Flood 填洼（海洋+边界种子、closed-at-push 堆；hydroElev 先做与 cellTopY 同型的 7 点均值平滑）+ 湖判定（ε=0.008、≥3 格、湖面=溢流高程）；S2 D6 最陡下降 + 低频噪声破对称 + 填洼平台多源 BFS + Kahn 拓扑累加汇流面积。`generateMap` 接线 `map.hydrology`。
+   **新门禁 `hydro:check`**（`scripts/hydro-check.ts`，入 `p0:check`，profile 之后）：H1 覆盖性/链终止/面积守恒 + H5 湖不变量。实测 seed 20260916：583 陆地格全部汇海成树、maxChain 16、terminalArea=583；湖机制在 seed 1/2/42/2024/31415/8888 触发且过门禁（该门禁种子本身无内陆洼地，0 湖——H5 存在性留给 M2 验收）。
+3. **A·文档同步（P0/P1）**：VISUAL_TARGETS（Cliffs 行改「连续剖面 met」、metrics 重置 walls=0+profile 口径）、README（悬崖保留/侧壁 strata 三处 + verify 门禁说明）、TECHNIQUES（keep 回插事实修正、walls 38→0、删除 Vertical-face ambient lift 行、合并重复 metrics 节）、maturity-spec（2026-09-19 时效横幅 + §2.2/§2.4瀑布/P1-3/P2-1 改写）、game-design-web（拾取改 heightAt 口径）、shots/README、impl-progress 阅读注。
+4. **D-0·calib-y 失效修复**：`scripts/calib-y.ts` 曾向 `displaceLandY` 传 `dispW=0`（所有位移项乘 dispW → 恒 0），探针实际测的是**未位移**焊接场。修复为传 `dispWeight(map, x, z)`，输出真实位移分布（峰顶 3.369→3.801，p50 1.373→1.426）。frag 雪线带 [1.47,1.89] 未动（视觉标定值）；其与修复后探针建议带 [2.66,3.42] 的失配记为方向 D 重标定步骤（D3）的输入，先冻结本轮截图为基线。
+
+命令与证据：`npx tsc --noEmit` 0；`npm run verify` 全绿（八项含新 hydro:check）；`npm run shots` 重出官方 5 图；`node scripts/field-view.mjs --modes 1,4,5` 与 `node scripts/orient-metric.mjs` 前后对照存档于汇总文档。
+遗留：D1–D4（噪声 TS 移植→顶点烘焙→雪线重标定→文档收口）；C-M2（S3 下切）；shader 侧 coverAmt 扰动减半试验；E（G6 玩法闭环）。
+
+## 观感工作流 P1+P2 轮（2026-09-19 晚，look-workflow 首两轮）
+
+合并远端 `605e594`（窄脊/宽浅架/森林分形/水色）后按 look-workflow 执行；P1 构图轮 + P2 光照轮各一。
+
+**P1 构图（massif → 山链）**：`mapgen.ts` 加 `LookParams`——种子化珠链山脊折线（`buildChains`/`chainMaskAt`：3 条链 × 48 采样、峰珠振幅 0.55+0.45sin、(1−d/w)² 衰减），elev 叠加 `mask×chainAmp`；`baseKeep 0.58` 压低链间谷、`spineBoostKeep 0.12` 把 legacy 脊增强降为纹理级；`shoreExempt 0.45` 豁免近岸压扁（入海山脊不再削平）；分类：`mask>0.5` 强制 Mountains、Desert 加 `elev<0.42` 门（干旱带不再给高地涂奶油色）。
+扫参：`scripts/look-sweep.ts`（内置 PNG 编码器，纯 CPU 出高程灰+生物群系彩网格）3 批 23 变体（`docs/shots/_sweep-p1-*/`），选 C1。灰 albedo 证据 `_look-p1-mode9.png`：**两条山链+链间谷+山麓带，穹顶消失**。rubric `01/composition 0→2`。
+**P2 光照（黏土漫射 → 明暗面）**：`terrainContinuity.bakeLightmap`（tex2：R=光线步进日晒、G=地平线 AO、B=位移后高度；高度源 `heightAt('shader')` 与画面同源；高度网格预采样 ~2.5 万次 heightAt，免 120 万次）；材质加 `uMapTex2`/`uShadowK`/`uAOK`/`uShadowCool`，frag 直射项乘 `sunGate`、AO 乘烘焙值、阴影面冷色调（look-workflow P2 推荐的 CPU 烘焙路线）。
+扫参：`scripts/look-sweep-p2.mjs` 6 档（`docs/shots/_sweep-p2-light/grid.png`），选 L3（0.95/0.75/0.5）。rubric `01/lighting 1→2`。
+门禁：glsl ES1+ES3 OK、`verify` 八项全绿（含修复后的 hydro:check）。**hydro:check 两处修复**（远端更深深切暴露）：S2b 平台路由改为「分量出口=已解析/边界终端邻格(≤本平台水位)+多根 BFS」，消除 step-1×BFS 混合 2-环；边界洼地终端语义入门禁（H1a/H1b/H1c）。17 种子全过。
+新工具：`scripts/look-sweep.ts`、`look-channels.mjs`、`look-rubric.mjs`、`look-sweep-p2.mjs`、`png.ts`；`docs/design/look-scores.md`。
+残留：P3 分级（链岩仍偏米色）、P4 真河、P5 林冠起伏、P7 外缘锯齿。
+
+## 观感工作流 P3+P4 轮（2026-09-19 深夜，接 P1/P2）
+
+**P3 分级（灰雾 → 暖阳冷影）**：frag grade 移到 tonemap **之前**——新增 `uExposure/uSaturation/uSplitWarm`（warm `vec3(1.07,0.99,0.86)` / cool `vec3(0.88,0.95,1.14)` 按 preLuma smoothstep 分离），删除原 post-tonemap 的 sat 1.16 与旧 split（避免双重分级）。扫参 `scripts/look-sweep-p3.mjs`：3×3 饱和×split + 2 曝光探针（`docs/shots/_sweep-p3-grade/grid.png` + manifest）；sat 1.45 过饱和（浅海刺眼）、1.00 太闷，选 **G-sat1.22-spl0.90**（exposure 1.04）。rubric `01/调色 1→2`。
+
+**P4 真河 M2/S3（假河 → 水文河道）**：删除贪心游走 `carveValleys`，`generateMap` 重排为 S1/S2（pre-carve）→ `carveChannels` → `recomputeRiverDist` → S1/S2（post-carve，门禁口径=出货口径）。
+- `carveChannels`：`area≥16`（`CHANNEL_AREA_THRESHOLD`）选河（40 格 ≈ 6% 陆地）；深度=流功率静态近似 `min(0.12, 0.18·√A·slope)` 过 **2 遍 7 点陆地均值**（规格要求的同型平滑核，兼作岸坡倒角）；**嘴→上游**排序写入并强制河床沿树下降（`elev[i] ≥ elev[receiver]+0.004`），杜绝下切自造洼地/跌水。
+- `computeHydrology` 加 **Strahler**（独立 donor 计数的 Kahn，max1/max2 法则）+ `stats.maxStrahler/channelCells`；`channelWidth(A)=0.2·(A/16)^0.45`（Hack 量级，源头 0.2 → 河口 ≤1.6 格）。
+- `recomputeRiverDist`：真通道 6 步 BFS 归一化 + Riverbank，喂给既有 frag 河带管线（bank 绿带 + ribbon 蓝带 + 河面高光）。
+- `hydro:check` 扩 **H2**：`maxStrahler ≥ 3`（≥20 通道格时）+ 宽度沿下游链单调不减断言。门禁种子：Strahler 3、通道 40 格、主干 22 格；16 种子全过。
+- `profile:check` H3 保绿：maxStepDelta 0.00858→0.02193（< 0.05，V 谷连续），maxSlope 0.86→2.19。
+- 渲染验证：官方 01/04 上**连续青蓝水带沿谷地蜿蜒入海**（bank 绿 + ribbon 蓝 + spec），河轴从「数据有、画面无」升级为可读。rubric `01/河 0→2`。
+
+新 rubric 记录见 `docs/design/look-scores.md`（composition 2 / lighting 2 / 调色 2 / 河 2，均无回归）。残留：P4 完整 S4（水面高程进 heightAt + pick 契约改口径 + uMapTex3 flow 通道）、P5 林冠起伏、P7 外缘锯齿。
